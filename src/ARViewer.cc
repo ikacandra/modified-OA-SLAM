@@ -181,7 +181,7 @@ void ARViewer::Run()
     RenderMode current_mode = RenderMode::color;
     pangolin::AxisDirection spin_direction = pangolin::AxisNone;
     std::vector<std::future<pangolin::Geometry>> geom_to_load;
-    std::vector<std::string>  fn = {"../Data/ball.ply"};
+    std::vector<std::string>  fn = {"Data/ball.ply"};
      for(const auto& filename : fn)
     {
         geom_to_load.emplace_back(std::async(std::launch::async,[filename](){

@@ -105,8 +105,8 @@ std::vector<Detection::Ptr> ObjectDetector::detect(cv::Mat img) const
 {
 
     // Settings
-    const int INPUT_WIDTH = 640.0/2; // size of image passed to the network (reducing may be faster to process)
-    const int INPUT_HEIGHT = 640.0/2;
+    const int INPUT_WIDTH = 640.0; // size of image passed to the network (reducing may be faster to process)
+    const int INPUT_HEIGHT = 640.0;
     const float SCORE_THRESHOLD = 0.5;
     const float NMS_THRESHOLD = 0.45;
     const float CONFIDENCE_THRESHOLD = 0.45;

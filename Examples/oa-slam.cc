@@ -164,7 +164,7 @@ int main(int argc, char **argv)
     }
 
     // Create system
-    ORB_SLAM2::System SLAM(vocabulary_file, parameters_file, ORB_SLAM2::System::MONOCULAR, true, true, false);
+    ORB_SLAM2::System SLAM(vocabulary_file, parameters_file, ORB_SLAM2::System::MONOCULAR, true, false, false);
     SLAM.SetRelocalizationMode(relocalization_mode);
 
     // Vector for tracking time statistics

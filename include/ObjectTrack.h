@@ -189,8 +189,7 @@ public:
 
     std::pair<std::unordered_map<KeyFrame*, BBox2,
                        std::hash<KeyFrame*>,
-                       std::equal_to<KeyFrame*>,
-                       Eigen::aligned_allocator<std::pair<KeyFrame const*, BBox2>>>, 
+                       std::equal_to<KeyFrame*>>, 
                        std::unordered_map<KeyFrame*, double>>
     CopyDetectionsMapInKeyFrames() const {
         unique_lock<mutex> lock(mutex_add_detection_);
@@ -246,8 +245,7 @@ public:
     RingBuffer<double> scores_ = RingBuffer<double>(max_frames_history);
     std::unordered_map<KeyFrame*, BBox2,
                        std::hash<KeyFrame*>,
-                       std::equal_to<KeyFrame*>,
-                       Eigen::aligned_allocator<std::pair<KeyFrame const*, BBox2>>> keyframes_bboxes_;
+                       std::equal_to<KeyFrame*>> keyframes_bboxes_;
     std::unordered_map<KeyFrame*, double> keyframes_scores_;
     
     mutable std::mutex mutex_add_detection_;
