@@ -31,6 +31,7 @@ using json = nlohmann::json;
 
 #include "Utils.h"
 #include <opencv2/opencv.hpp>
+#include <opencv2/dnn.hpp>
 
 
 namespace ORB_SLAM2
@@ -42,14 +43,16 @@ public:
     typedef std::shared_ptr<Detection> Ptr;
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
 
-    Detection(unsigned int cat, double det_score, const BBox2 bb)
-    : category_id(cat), score(det_score), bbox(bb) {}
+    // Modified constructor to include mask (optional)
+    Detection(unsigned int cat, double det_score, const BBox2 bb, const cv::Mat& m = cv::Mat())
+    : category_id(cat), score(det_score), bbox(bb), mask(m) {}
 
 
     friend std::ostream& operator <<(std::ostream& os, const Detection& det);
     unsigned int category_id;
     double score;
     BBox2 bbox;
+    cv::Mat mask; // Binary mask or float mask of the object
 
 private:
     Detection() = delete;

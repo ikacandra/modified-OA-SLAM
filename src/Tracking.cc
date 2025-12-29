@@ -308,17 +308,47 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
             cvtColor(mImGray,mImGray,CV_BGRA2GRAY);
     }
 
-    if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)
+    if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET){
         mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
-    else
+    } else {
         mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
-
+    }
+    
     current_frame_detections_ = detections;
     current_frame_good_detections_.clear();
     for (auto det : current_frame_detections_) {
         if (det->score > 0.5) {
             // if (det->category_id != 73 && det->score > 0.5 ||  det->score > 0.7) { // for table scene to ignore book on the nappe
             current_frame_good_detections_.push_back(det);
+        }
+    }
+
+    // Filter Keypoints inside Masks
+    for (auto det : current_frame_good_detections_) {
+        // Kiểm tra nếu có mask và là class cần lọc (ví dụ: người - class 0)
+        // Lưu ý: det->category_id == 0 cần được định nghĩa hoặc kiểm tra đúng class ID của model YOLO bạn dùng
+        if (!det->mask.empty() && det->category_id == 0) { 
+            
+            int n_filtered = 0;
+            // Duyệt qua tất cả keypoints trong frame
+            for (size_t i = 0; i < mCurrentFrame.mvKeys.size(); ++i) {
+                // Nếu điểm đã bị đánh dấu outlier (từ bước trước hoặc do nằm ngoài biên), bỏ qua
+                if (mCurrentFrame.mvbOutlier[i]) continue;
+
+                const cv::KeyPoint &kp = mCurrentFrame.mvKeys[i];
+                int x = cvRound(kp.pt.x);
+                int y = cvRound(kp.pt.y);
+
+                // Kiểm tra biên an toàn
+                if (x >= 0 && x < det->mask.cols && y >= 0 && y < det->mask.rows) {
+                    // Kiểm tra giá trị mask. Giả sử mask là CV_8U binary (0 hoặc 255)
+                    if (det->mask.at<unsigned char>(y, x) > 0) {
+                        mCurrentFrame.mvbOutlier[i] = true; // Đánh dấu điểm nhiễu
+                        n_filtered++;
+                    }
+                }
+            }
+            std::cout << "Filtered " << n_filtered << " keypoints on dynamic object." << std::endl;
         }
     }
 
@@ -378,10 +408,10 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
             current_mean_depth_ = z_mean;
         }
 
-        std::cout << "Frame " << current_frame_idx_ << " ===========\n";
+        //std::cout << "Frame " << current_frame_idx_ << " ===========\n";
         // std::cout << "Created new KF: " << createdNewKeyFrame_ << "\n";
-        std::cout << "Nb Object Tracks: " << objectTracks_.size() << "\n";
-        std::cout << "Nb Map Objects  : " << mpMap->GetNumberMapObjects() << "\n";
+        //std::cout << "Nb Object Tracks: " << objectTracks_.size() << "\n";
+        //std::cout << "Nb Map Objects  : " << mpMap->GetNumberMapObjects() << "\n";
         // for (auto tr : objectTracks_) {
         //     std::cout << "    - tr " << tr->GetId() << " : " << tr->GetNbObservations() << "\n";
         // }

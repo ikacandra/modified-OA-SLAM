@@ -22,13 +22,47 @@
 
 #include <experimental/filesystem>
 #include <unordered_set>
+#include <algorithm> // for max, min
 
+#define person_class_id 0
 
 namespace fs = std::experimental::filesystem;
 
 
 namespace ORB_SLAM2
 {
+
+// ================= HELPER FUNCTION FOR MASK GENERATION =================
+// Generates binary mask from proto masks and coefficients
+static cv::Mat generateMask(const cv::Mat& proto_masks, const std::vector<float>& coeffs) {
+    // proto_masks: [32, 160, 160] (flattened or shaped)
+    // coeffs: [32]
+    
+    if (coeffs.size() != 32) {
+        return cv::Mat();
+    }
+
+    // Prepare mask: 160x160
+    cv::Mat mask = cv::Mat::zeros(160, 160, CV_32F);
+    float* mask_ptr = (float*)mask.data;
+    const float* proto_data = (const float*)proto_masks.data;
+    
+    // Linear combination: mask = sum(coeff[i] * proto[i])
+    for (int i = 0; i < 32; i++) {
+        float coeff = coeffs[i];
+        for (int j = 0; j < 160 * 160; j++) {
+            mask_ptr[j] += coeff * proto_data[i * 160 * 160 + j];
+        }
+    }
+    
+    // Sigmoid activation
+    for (int i = 0; i < 160 * 160; i++) {
+        mask_ptr[i] = 1.0f / (1.0f + std::exp(-mask_ptr[i]));
+    }
+    
+    return mask; // Returns 160x160 float mask (0.0 to 1.0)
+}
+
 
 std::ostream& operator <<(std::ostream& os, const Detection& det)
 {
@@ -97,88 +131,192 @@ ObjectDetector::ObjectDetector(const std::string& model, const std::vector<int>&
         *network_ =  cv::dnn::readNet(model);
     else
         *network_ =  cv::dnn::readNetFromDarknet(model + ".cfg", model + ".weights");
+    
+    // Try to use CUDA if available
     network_->setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
     network_->setPreferableTarget(cv::dnn::DNN_TARGET_CUDA);
 }
 
 std::vector<Detection::Ptr> ObjectDetector::detect(cv::Mat img) const
 {
-
-    // Settings
-    const int INPUT_WIDTH = 640.0; // size of image passed to the network (reducing may be faster to process)
-    const int INPUT_HEIGHT = 640.0;
+    // Settings for YOLOv8
+    const int INPUT_WIDTH = 640; 
+    const int INPUT_HEIGHT = 640;
     const float SCORE_THRESHOLD = 0.5;
     const float NMS_THRESHOLD = 0.45;
-    const float CONFIDENCE_THRESHOLD = 0.45;
 
-    cv::Mat result;
-    cv::dnn::blobFromImage(img, result, 1./255, cv::Size(INPUT_WIDTH, INPUT_HEIGHT), cv::Scalar(), true, false);
+    int original_width = img.cols;
+    int original_height = img.rows;
+
+    // Preprocessing
+    cv::Mat blob;
+    cv::dnn::blobFromImage(img, blob, 1./255.0, cv::Size(INPUT_WIDTH, INPUT_HEIGHT), cv::Scalar(), true, false);
     
-    std::vector<cv::Mat> predictions;
-    // for (auto x : network_->getUnconnectedOutLayersNames())
-    //     std::cout << x  << std::endl;
+    network_->setInput(blob);
+
+    // Forward pass - Requesting all outputs
+    std::vector<cv::Mat> outputs;
+    // For YOLOv8-seg, we usually have 2 outputs: detections and proto-masks
+    // If names are not known, getUnconnectedOutLayersNames() is safest
+    std::vector<std::string> out_names = network_->getUnconnectedOutLayersNames();
     
-    auto outnames = network_->getUnconnectedOutLayersNames().back();    // output only the last layer
-    network_->setInput(result);
-    network_->forward(predictions, outnames);
-    const cv::Mat& output = predictions[0];
-    // output should have size: 1 x nb_detections x (5 + nb_classes)
+    network_->forward(outputs, out_names);
 
-    float x_factor = (float)(img.cols) / INPUT_WIDTH;
-    float y_factor = (float)(img.rows) / INPUT_HEIGHT;
-    float *data = (float *)output.data;
+    // Expecting at least 2 outputs for Segmentation model
+    if (outputs.size() < 2) {
+        std::cerr << "Error: Expected at least 2 outputs for YOLOv8 Segmentation model. Got " << outputs.size() << std::endl;
+        // Fallback or empty return if not matching expectation
+        // return {}; 
+        // Proceeding with caution, logic below assumes index 0 is dets and 1 is masks.
+    }
 
-    const int rows = output.size[1];
-    const int cols = output.size[2];
+    // Output 0: Detections [Batch, 4 + NumClasses + 32, NumAnchors]
+    // Output 1: Proto-masks [Batch, 32, 160, 160]
+    
+    cv::Mat output_dets = outputs[0];
+    cv::Mat output_masks_proto = outputs[1];
+
+    // Reshape Logic
+    // Reshape output_dets to [NumAnchors, NumValues]
+    int num_detections = output_dets.size[2];
+    int num_values = output_dets.size[1]; // 4 (box) + Classes + 32 (coeffs)
+    
+    // Transpose logic: (1, Channels, Anchors) -> (Anchors, Channels)
+    cv::Mat dets_reshaped(num_detections, num_values, CV_32F);
+    float* src = (float*)output_dets.data;
+    float* dst = (float*)dets_reshaped.data;
+    for (int i = 0; i < num_detections; i++) {
+        for (int j = 0; j < num_values; j++) {
+            dst[i * num_values + j] = src[j * num_detections + i];
+        }
+    }
+
+    // Reshape proto masks if needed
+    // Proto mask should be [Batch, 32, 160, 160]
+    // We can access it directly as float array
+
+    float x_factor = (float)original_width / INPUT_WIDTH;
+    float y_factor = (float)original_height / INPUT_HEIGHT;
+    float* data = (float*)dets_reshaped.data;
 
     std::vector<int> class_ids;
-    class_ids.reserve(1000);
     std::vector<float> confidences;
-    confidences.reserve(1000);
     std::vector<cv::Rect> boxes;
-    boxes.reserve(1000);
+    std::vector<std::vector<float>> mask_coeffs_list;
+
+    // Assuming COCO 80 classes by default, but calculating dynamically
+    // format: [cx, cy, w, h, class_score_0, ..., class_score_N, mask_coeff_0, ... mask_coeff_31]
+    int num_mask_coeffs = 32;
+    int num_classes = num_values - 4 - num_mask_coeffs; 
     
-    int nb_classes = cols - 5;
-    for (int i = 0; i < rows; ++i) {
+    // Safety check
+    if (num_classes <= 0) {
+         // Fallback for detection only models if someone passes wrong model
+         num_classes = num_values - 4; // standard YOLO
+         num_mask_coeffs = 0; 
+    }
 
-        float confidence = data[4];
-        if (confidence >= .4) {
+    for (int i = 0; i < num_detections; ++i) {
+        
+        float* class_scores = data + 4;
+        float max_score = 0.0f;
+        int best_class = -1;
 
-            float * classes_scores = data + 5;
-            cv::Mat scores(1, nb_classes, CV_32FC1, classes_scores);
-            cv::Point class_id;
-            double max_class_score;
-            minMaxLoc(scores, 0, &max_class_score, 0, &class_id);
-
-            if (ignored_cats_.count(class_id.x) == 0 && max_class_score > SCORE_THRESHOLD) {
-
-                confidences.push_back(max_class_score);
-                class_ids.push_back(class_id.x);
-
-                float x = data[0];
-                float y = data[1];
-                float w = data[2];
-                float h = data[3];
-                int left = int((x - 0.5 * w) * x_factor);
-                int top = int((y - 0.5 * h) * y_factor);
-                int width = int(w * x_factor);
-                int height = int(h * y_factor);
-                boxes.push_back(cv::Rect(left, top, width, height));    
+        // Find best class
+        for (int j = 0; j < num_classes; j++) {
+            if (class_scores[j] > max_score) {
+                max_score = class_scores[j];
+                best_class = j;
             }
         }
-        data += cols;
+
+        if (max_score > SCORE_THRESHOLD) {
+             if (ignored_cats_.count(best_class) == 0) {
+                 
+                float cx = data[0];
+                float cy = data[1];
+                float w = data[2];
+                float h = data[3];
+
+                int left = std::max(0, int((cx - 0.5f * w) * x_factor));
+                int top = std::max(0, int((cy - 0.5f * h) * y_factor));
+                int width = std::max(1, int(w * x_factor));
+                int height = std::max(1, int(h * y_factor));
+                
+                boxes.push_back(cv::Rect(left, top, width, height));
+                confidences.push_back(max_score);
+                class_ids.push_back(best_class);
+
+                // Extract Mask Coeffs if available
+                if (num_mask_coeffs > 0) {
+                    std::vector<float> coeffs(num_mask_coeffs);
+                    float* coeff_ptr = data + 4 + num_classes;
+                    for (int k = 0; k < num_mask_coeffs; k++) {
+                        coeffs[k] = coeff_ptr[k];
+                    }
+                    mask_coeffs_list.push_back(coeffs);
+                }
+             }
+        }
+        data += num_values;
     }
 
-    // Filter detection with NMS
-    std::vector<Detection::Ptr> detections;
+    // NMS
     std::vector<int> nms_result;
     cv::dnn::NMSBoxes(boxes, confidences, SCORE_THRESHOLD, NMS_THRESHOLD, nms_result);
-    for (int i = 0; i < nms_result.size(); i++) {
-        int idx = nms_result[i];
-        cv::Rect& bb = boxes[idx];
-        Eigen::Vector4d bbox(bb.x, bb.y, bb.x + bb.width, bb.y + bb.height);
-        detections.push_back(std::shared_ptr<Detection>(new Detection(class_ids[idx], confidences[idx], bbox)));
+
+    std::vector<Detection::Ptr> detections;
+    
+    for (int idx : nms_result) {
+        cv::Rect box = boxes[idx];
+        
+        // Generate Mask
+        cv::Mat final_mask;
+        if (num_mask_coeffs > 0 && !mask_coeffs_list.empty()) {
+            cv::Mat raw_mask = generateMask(output_masks_proto, mask_coeffs_list[idx]);
+            if (!raw_mask.empty()) {
+                // Resize mask to original image size
+                // Note: The mask from generateMask is 160x160.
+                cv::Mat resized_mask;
+                cv::resize(raw_mask, resized_mask, cv::Size(original_width, original_height));
+                
+                // Threshold to make it binary or keep as float probability? 
+                // Let's keep it as thresholded binary for SLAM usage (CV_8U)
+                // resized_mask = (resized_mask > 0.5); 
+                // However, returning float mask might be more versatile. 
+                // For now, let's threshold it to save memory/processing in Tracker if strictly binary is needed.
+                // Or store as CV_8U 0 or 255.
+                
+                cv::threshold(resized_mask, final_mask, 0.5, 255, cv::THRESH_BINARY);
+                final_mask.convertTo(final_mask, CV_8U);
+                
+                if (final_mask.empty()) {
+                    std::cout << "[DEBUG] Mask EMPTY for class " << class_ids[idx] << std::endl;
+                } else {
+                    int white_pixels = cv::countNonZero(final_mask);
+                    std::cout << "[DEBUG] Detection: Class=" << class_ids[idx] 
+                              << ", Score=" << confidences[idx]
+                              << ", Mask Size=" << final_mask.cols << "x" << final_mask.rows
+                              << ", White Pixels=" << white_pixels << std::endl;
+                    
+                    // (Tùy chọn) Lưu mask ra ảnh để xem bằng mắt thường
+                    // std::string debug_name = "debug_mask_" + std::to_string(class_ids[idx]) + ".png";
+                    // cv::imwrite(debug_name, final_mask);
+                }
+                // Optional: Crop mask to bbox only to save space?
+                // For global consistency, keeping full image size is easier for mapping (x,y) -> mask(x,y).
+            }
+        }
+
+        // Convert cv::Rect to Eigen::Vector4d (x1, y1, x2, y2)
+        Eigen::Vector4d bbox(box.x, box.y, box.x + box.width, box.y + box.height);
+
+        // Create Detection object
+        detections.push_back(std::shared_ptr<Detection>(
+            new Detection(class_ids[idx], confidences[idx], bbox, final_mask)
+        ));
     }
+
     return detections;
 }
 #endif
