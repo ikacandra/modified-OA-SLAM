@@ -1062,6 +1062,49 @@ void ORBextractor::operator()( InputArray _image, InputArray _mask, vector<KeyPo
     ComputeKeyPointsOctTree(allKeypoints);
     //ComputeKeyPointsOld(allKeypoints);
 
+    // [OA-SLAM] Filter keypoints using mask provided in the constructor
+    // If mask pixel is > 0, the keypoint is discarded (dynamic object)
+    if (!_mask.empty())
+    {
+        cv::Mat mask = _mask.getMat();
+        if (mask.type() == CV_8UC1)
+        {
+            for (int level = 0; level < nlevels; ++level)
+            {
+                vector<cv::KeyPoint>& keypoints = allKeypoints[level];
+                vector<cv::KeyPoint> good_keypoints;
+                good_keypoints.reserve(keypoints.size());
+
+                float scale = mvScaleFactor[level];
+
+                for (size_t i = 0; i < keypoints.size(); ++i)
+                {
+                    const cv::KeyPoint& kp = keypoints[i];
+                    // Map coordinate to original image level
+                    int x = cvRound(kp.pt.x * scale);
+                    int y = cvRound(kp.pt.y * scale);
+
+                    // Check boundaries
+                    if (x >= 0 && x < mask.cols && y >= 0 && y < mask.rows)
+                    {
+                        // If mask value is 0 (background), keep the point.
+                        // If mask value > 0 (dynamic object), discard it.
+                        if (mask.at<unsigned char>(y, x) == 0)
+                        {
+                            good_keypoints.push_back(kp);
+                        }
+                    }
+                    else
+                    {
+                        // Should be safe to keep if outside mask bounds?
+                        good_keypoints.push_back(kp);
+                    }
+                }
+                keypoints = good_keypoints;
+            }
+        }
+    }
+
     Mat descriptors;
 
     int nkeypoints = 0;

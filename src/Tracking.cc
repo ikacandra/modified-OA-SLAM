@@ -308,12 +308,7 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
             cvtColor(mImGray,mImGray,CV_BGRA2GRAY);
     }
 
-    if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET){
-        mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
-    } else {
-        mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
-    }
-    
+    // [MOVED UP] Process detections first to create mask for Frame
     current_frame_detections_ = detections;
     current_frame_good_detections_.clear();
     for (auto det : current_frame_detections_) {
@@ -323,33 +318,25 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
         }
     }
 
-    // Filter Keypoints inside Masks
+    // [OA-SLAM] Create total mask for dynamic objects
+    cv::Mat total_mask = cv::Mat::zeros(im.rows, im.cols, CV_8UC1);
     for (auto det : current_frame_good_detections_) {
-        // Kiểm tra nếu có mask và là class cần lọc (ví dụ: người - class 0)
-        // Lưu ý: det->category_id == 0 cần được định nghĩa hoặc kiểm tra đúng class ID của model YOLO bạn dùng
-        if (!det->mask.empty() && det->category_id == 0) { 
-            
-            int n_filtered = 0;
-            // Duyệt qua tất cả keypoints trong frame
-            for (size_t i = 0; i < mCurrentFrame.mvKeys.size(); ++i) {
-                // Nếu điểm đã bị đánh dấu outlier (từ bước trước hoặc do nằm ngoài biên), bỏ qua
-                if (mCurrentFrame.mvbOutlier[i]) continue;
+         // Filter 'person' (0) or other dynamic classes
+         if (!det->mask.empty() && det->category_id == 0) {
+             cv::bitwise_or(total_mask, det->mask, total_mask);
+         }
+    }
+    
+    // Optional: Dilate the total mask to cover boundaries significantly
+    if (cv::countNonZero(total_mask) > 0) {
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(15, 15));
+        cv::dilate(total_mask, total_mask, kernel);
+    }
 
-                const cv::KeyPoint &kp = mCurrentFrame.mvKeys[i];
-                int x = cvRound(kp.pt.x);
-                int y = cvRound(kp.pt.y);
-
-                // Kiểm tra biên an toàn
-                if (x >= 0 && x < det->mask.cols && y >= 0 && y < det->mask.rows) {
-                    // Kiểm tra giá trị mask. Giả sử mask là CV_8U binary (0 hoặc 255)
-                    if (det->mask.at<unsigned char>(y, x) > 0) {
-                        mCurrentFrame.mvbOutlier[i] = true; // Đánh dấu điểm nhiễu
-                        n_filtered++;
-                    }
-                }
-            }
-            std::cout << "Filtered " << n_filtered << " keypoints on dynamic object." << std::endl;
-        }
+    if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET){
+        mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth, total_mask);
+    } else {
+        mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth, total_mask);
     }
 
     if (force_relocalize)
