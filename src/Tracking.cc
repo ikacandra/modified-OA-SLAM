@@ -78,6 +78,10 @@ using std::chrono::duration_cast;
 using std::chrono::duration;
 using std::chrono::milliseconds;
 
+#define PEOPLE_CATEGORY_ID 0
+#define KEYBOARD_CATEGORY_ID 66
+#define MONITOR_CATEGORY_ID 62
+
 namespace ORB_SLAM2
 {
 
@@ -322,7 +326,7 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
     cv::Mat total_mask = cv::Mat::zeros(im.rows, im.cols, CV_8UC1);
     for (auto det : current_frame_good_detections_) {
          // Filter 'person' (0) or other dynamic classes
-         if (!det->mask.empty() && det->category_id == 0) {
+         if (!det->mask.empty() && det->category_id == MONITOR_CATEGORY_ID) {
              cv::bitwise_or(total_mask, det->mask, total_mask);
          }
     }
