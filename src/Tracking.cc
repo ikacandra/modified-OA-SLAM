@@ -314,21 +314,28 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
 
     // [MOVED UP] Process detections first to create mask for Frame
     current_frame_detections_ = detections;
-    current_frame_good_detections_.clear();
-    for (auto det : current_frame_detections_) {
-        if (det->score > 0.5) {
-            // if (det->category_id != 73 && det->score > 0.5 ||  det->score > 0.7) { // for table scene to ignore book on the nappe
-            current_frame_good_detections_.push_back(det);
-        }
-    }
+    current_frame_good_detections_.clear(); // Đây sẽ là danh sách vật tĩnh dùng cho SLAM
 
     // [OA-SLAM] Create total mask for dynamic objects
     cv::Mat total_mask = cv::Mat::zeros(im.rows, im.cols, CV_8UC1);
-    for (auto det : current_frame_good_detections_) {
-         // Filter 'person' (0) or other dynamic classes
-         if (!det->mask.empty() && det->category_id == MONITOR_CATEGORY_ID) {
-             cv::bitwise_or(total_mask, det->mask, total_mask);
-         }
+
+    for (auto det : current_frame_detections_) {
+        // CASE 1: Vật động (VD: người, class 0) -> Chỉ dùng để tạo Mask lọc Keypoint
+        if (det->category_id == KEYBOARD_CATEGORY_ID) { // Thay bằng 0 nếu là người
+             if (!det->mask.empty()) {
+                 cv::bitwise_or(total_mask, det->mask, total_mask);
+             }
+             // KHÔNG push vào current_frame_good_detections_ -> SLAM sẽ lờ đi
+             continue; 
+        }
+
+        // CASE 2: Vật tĩnh (đủ score) -> Dùng cho Object SLAM
+        if (det->score > 0.5) {
+            current_frame_good_detections_.push_back(det);
+            
+            // Nếu bạn muốn mask cả vật tĩnh (để tránh keypoint trên vật tĩnh) thì uncomment dòng dưới:
+            // if (!det->mask.empty()) cv::bitwise_or(total_mask, det->mask, total_mask);
+        }
     }
     
     // Optional: Dilate the total mask to cover boundaries significantly
