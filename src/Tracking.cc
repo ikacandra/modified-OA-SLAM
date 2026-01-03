@@ -259,10 +259,12 @@ cv::Mat Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat &imRe
 }
 
 
-cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp)
+cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, const std::vector<Detection::Ptr>& detections, bool force_relocalize)
 {
+    current_frame_idx_ = (current_frame_idx_ + 1) % (std::numeric_limits<size_t>::max()-1);
     mImGray = imRGB;
     cv::Mat imDepth = imD;
+    imRGB.copyTo(im_rgb_);
 
     if(mImGray.channels()==3)
     {
@@ -279,12 +281,356 @@ cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const d
             cvtColor(mImGray,mImGray,CV_BGRA2GRAY);
     }
 
+    // [MOVED UP] Process detections first to create mask for Frame
+    current_frame_detections_ = detections;
+    current_frame_good_detections_.clear(); // Đây sẽ là danh sách vật tĩnh dùng cho SLAM
+
+    // [OA-SLAM] Create total mask for dynamic objects
+    cv::Mat total_mask = cv::Mat::zeros(imRGB.rows, imRGB.cols, CV_8UC1);
+
+    for (auto det : current_frame_detections_) {
+        // CASE 1: Vật động (VD: người, class 0) -> Chỉ dùng để tạo Mask lọc Keypoint
+        if (det->category_id == PEOPLE_CATEGORY_ID) { // Thay bằng 0 nếu là người
+             if (!det->mask.empty()) {
+                 cv::bitwise_or(total_mask, det->mask, total_mask);
+             }
+             // KHÔNG push vào current_frame_good_detections_ -> SLAM sẽ lờ đi
+             continue; 
+        }
+
+        // CASE 2: Vật tĩnh (đủ score) -> Dùng cho Object SLAM
+        if (det->score > 0.5) {
+            current_frame_good_detections_.push_back(det);
+            
+            // Nếu bạn muốn mask cả vật tĩnh (để tránh keypoint trên vật tĩnh) thì uncomment dòng dưới:
+            // if (!det->mask.empty()) cv::bitwise_or(total_mask, det->mask, total_mask);
+        }
+    }
+
+    // Optional: Dilate the total mask to cover boundaries significantly
+    if (cv::countNonZero(total_mask) > 0) {
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(15, 15));
+        cv::dilate(total_mask, total_mask, kernel);
+    }
+
     if((fabs(mDepthMapFactor-1.0f)>1e-5) || imDepth.type()!=CV_32F)
         imDepth.convertTo(imDepth,CV_32F,mDepthMapFactor);
 
-    mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
+    
+    mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth, total_mask);
+    
+    if (force_relocalize)
+    {
+        auto t1 = high_resolution_clock::now();
 
-    Track();
+        bool bOK = false;
+        if (mpSystem->GetRelocalizationMode() == RELOC_POINTS) {
+            std::cout << "Relocalize with points.\n";
+            bOK = Relocalization();
+        } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS) {
+            std::cout << "Relocalize with objects.\n";
+            bOK = RelocalizationFromObjects(false);
+        } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS_POINTS) {
+            std::cout << "Relocalize with objects and points.\n";
+            bOK = Relocalization();
+            if (!bOK)
+                bOK = RelocalizationFromObjects(true);
+        }
+
+        auto t2 = high_resolution_clock::now();
+        duration<double, std::milli> ms_double = t2 - t1;
+
+        mpFrameDrawer->Update(this);
+        if (bOK)
+            mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.mTcw);
+
+        mpSystem->relocalization_duration = ms_double.count();
+        mpSystem->relocalization_status = bOK;
+    }
+    else
+    {
+        Track();
+
+        // if (!mbOnlyTracking)    // if in localization-only mode, no neeed to track objects
+        //     break;
+
+        /////////////////////////////////// Objects Tracking ///////////////////////////////////
+        // Update mean depth
+        if (mState == Tracking::OK) {
+            Matrix34d Rt = cvToEigenMatrix<double, float, 3, 4>(mCurrentFrame.mTcw);
+            double z_mean = 0.0;
+            unsigned int z_nb = 0;
+            for(size_t i = 0; i < mCurrentFrame.mvpMapPoints.size(); i++) {
+                MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+                if(pMP && !mCurrentFrame.mvbOutlier[i]) {
+                    cv::Mat mp =  pMP->GetWorldPos();
+                    Eigen::Vector4d p(mp.at<float>(0), mp.at<float>(1), mp.at<float>(2), 1.0);
+                    Eigen::Vector3d p_cam = Rt * p;
+                    z_mean += p_cam[2];
+                    z_nb++;
+                }
+            }
+            z_mean /= z_nb;
+            // std::cout << "Mean depth = " << z_mean << "\n";
+            current_mean_depth_ = z_mean;
+        }
+
+        //std::cout << "Frame " << current_frame_idx_ << " ===========\n";
+        // std::cout << "Created new KF: " << createdNewKeyFrame_ << "\n";
+        //std::cout << "Nb Object Tracks: " << objectTracks_.size() << "\n";
+        //std::cout << "Nb Map Objects  : " << mpMap->GetNumberMapObjects() << "\n";
+        // for (auto tr : objectTracks_) {
+        //     std::cout << "    - tr " << tr->GetId() << " : " << tr->GetNbObservations() << "\n";
+        // }
+
+        double MIN_2D_IOU_THRESH = 0.2;
+        double MIN_3D_IOU_THRESH = 0.3;
+        int TIME_DIFF_THRESH = 30;
+
+
+        BBox2 img_bbox(0, 0, imRGB.cols, imRGB.rows);
+
+        if (mState == Tracking::OK) {
+
+            // Keep only detections with a certain score
+            if (current_frame_good_detections_.size() != 0) {
+
+                KeyFrame *kf = mpLastKeyFrame;
+                if (!createdNewKeyFrame_)
+                    kf = nullptr;
+
+
+                // pre-compute all the projections of all ellipsoids which already reconstructed
+                Matrix34d Rt = cvToEigenMatrix<double, float, 3, 4>(mCurrentFrame.mTcw);
+                Matrix34d P;
+                P = K_ * Rt;
+                std::unordered_map<ObjectTrack::Ptr, BBox2> proj_bboxes;
+                for (auto tr: objectTracks_) {
+                    if (tr->GetStatus() == ObjectTrackStatus::INITIALIZED ||
+                        tr->GetStatus() == ObjectTrackStatus::IN_MAP) {
+                        MapObject* obj = tr->GetMapObject();
+                        Eigen::Vector3d c = obj->GetEllipsoid().GetCenter();
+                        double z = Rt.row(2).dot(c.homogeneous());
+                        auto ell = obj->GetEllipsoid().project(P);
+                        BBox2 bb = ell.ComputeBbox();
+                        if (bboxes_intersection(bb, img_bbox) < 0.3 * bbox_area(bb)) {
+                            continue;
+                        }
+                        proj_bboxes[tr] = ell.ComputeBbox();
+
+                        // Check occlusions and keep only the nearest
+                        std::unordered_set<ObjectTrack::Ptr> hidden;
+                        for (auto it : proj_bboxes) {
+                            if (it.first != tr && bboxes_iou(it.second, bb) > 0.9) {
+                                Eigen::Vector3d c2 = it.first->GetMapObject()->GetEllipsoid().GetCenter();
+                                double z2 = Rt.row(2).dot(c2.homogeneous());
+                                if (z < z2) {
+                                    // remove z2
+                                    hidden.insert(it.first);
+                                } else {
+                                    // remove z
+                                    hidden.insert(tr);
+                                }
+                                break;
+                            }
+                        }
+                        for (auto hid : hidden) {
+                            proj_bboxes.erase(hid);
+                        }
+                    }
+                }
+
+                // find possible tracks
+                std::vector<ObjectTrack::Ptr> possible_tracks;
+                for (auto tr : objectTracks_) {
+                    auto bb = tr->GetLastBbox();
+                    if (tr->GetLastObsFrameId() + 60 >= current_frame_idx_ &&
+                        bboxes_intersection(bb, img_bbox) >= 0.3 * bbox_area(bb)) {
+                        possible_tracks.push_back(tr);
+                    } else if (proj_bboxes.find(tr) != proj_bboxes.end()) {
+                        possible_tracks.push_back(tr);
+                    }
+                }
+
+                // Associated map points to each detection
+                std::vector<std::unordered_set<MapPoint*>> assoc_map_points(current_frame_good_detections_.size());
+                for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
+                    for (size_t j = 0; j < mCurrentFrame.mvKeysUn.size(); ++j) {
+                        if (mCurrentFrame.mvpMapPoints[j]) {
+                            const auto& kp = mCurrentFrame.mvKeysUn[j];
+                            MapPoint* corresp_map_point = mCurrentFrame.mvpMapPoints[j];
+                            if (is_inside_bbox(kp.pt.x, kp.pt.y, current_frame_good_detections_[i]->bbox)) {
+                                assoc_map_points[i].insert(corresp_map_point);
+                            }
+                        }
+                    }
+                }
+
+                // Try to match detections to existing object track based on the associated map points
+                int THRESHOLD_NB_MATCH = 10;
+                std::vector<int> matched_by_points(current_frame_good_detections_.size(), -1);
+                std::vector<std::vector<size_t>> nb_matched_points(current_frame_good_detections_.size(), std::vector<size_t>());
+                for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
+                    int det_cat = current_frame_good_detections_[i]->category_id;
+                    size_t max_nb_matches = 0;
+                    size_t best_matched_track = 0;
+                    for (size_t j = 0; j < possible_tracks.size(); ++j) {
+                        auto tr_map_points = possible_tracks[j]->GetAssociatedMapPoints();
+                        size_t n = count_set_map_intersection(assoc_map_points[i], tr_map_points);
+                        if (n > max_nb_matches) {
+                            max_nb_matches = n;
+                            best_matched_track = j;
+                        }
+
+                        if (det_cat != possible_tracks[j]->GetCategoryId())
+                            n = 0;
+                        nb_matched_points[i].push_back(n);
+                    }
+
+                    if (max_nb_matches > THRESHOLD_NB_MATCH &&
+                        current_frame_good_detections_[i]->category_id == possible_tracks[best_matched_track]->GetCategoryId()) {
+                        matched_by_points[i] = best_matched_track;
+                    }
+                }
+
+
+                int m = std::max(possible_tracks.size(), current_frame_good_detections_.size());
+                dlib::matrix<long> cost = dlib::zeros_matrix<long>(m, m);
+                std::vector<long> assignment(m, std::numeric_limits<long>::max()); // Important to have it in 'long', max_int is used to force assignment of tracks already matched using points
+                if (current_frame_good_detections_.size() > 0)
+                {
+                    // std::cout << "Hungarian algorithm size " << m << "\n";
+                    for (size_t di = 0; di < current_frame_good_detections_.size(); ++di) {
+                        auto det = current_frame_good_detections_[di];
+
+                        for (size_t ti = 0; ti < possible_tracks.size(); ++ti) {
+                            auto tr = possible_tracks[ti];
+                            if (tr->GetCategoryId() == det->category_id) {
+                                double iou_2d = 0;
+                                double iou_3d = 0;
+
+                                if (tr->GetLastObsFrameId() + TIME_DIFF_THRESH >= current_frame_idx_)
+                                    iou_2d = bboxes_iou(tr->GetLastBbox(), det->bbox);
+
+                                if (proj_bboxes.find(tr) != proj_bboxes.end())
+                                    iou_3d = bboxes_iou(proj_bboxes[tr], det->bbox);
+
+                                if (iou_2d < MIN_2D_IOU_THRESH) iou_2d = 0;
+                                if (iou_3d < MIN_3D_IOU_THRESH) iou_3d = 0;
+
+                                // std::cout << "2D: " << iou_2d << "\n";
+                                // std::cout << "3D: " << iou_3d << "\n";
+                                cost(di, ti) = std::max(iou_2d, iou_3d) * 1000;
+                            }
+                        }
+
+                        if (matched_by_points[di] != -1) {
+                            cost(di, matched_by_points[di]) = std::numeric_limits<int>::max();
+                        }
+                    }
+
+                    // for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
+                    //     for (size_t j = 0; j < possible_tracks.size(); ++j) {
+                    //         // std::cout << i << " " << j << " " << nb_matched_points[i][j] << "\n";
+                    //         cost(i, j) += nb_matched_points[i][j] * 1000;
+                    //     }
+                    // }
+
+                    assignment = dlib::max_cost_assignment(cost); // solve
+                }
+
+
+                std::vector<ObjectTrack::Ptr> new_tracks;
+                for (size_t di = 0; di < current_frame_good_detections_.size(); ++di) {
+                    auto det = current_frame_good_detections_[di];
+                    auto assigned_track_idx = assignment[di];
+                    if (assigned_track_idx >= static_cast<long>(possible_tracks.size()) || cost(di, assigned_track_idx) == 0) {
+                        // assigned to non-existing => means not assigned
+                        auto tr = ObjectTrack::CreateNewObjectTrack(det->category_id, det->bbox, det->score, Rt,
+                                                                    current_frame_idx_, this, kf);
+                        // std::cout << "create new track " << tr->GetId() << "\n";
+                        new_tracks.push_back(tr);
+                    } else {
+                        ObjectTrack::Ptr associated_track = possible_tracks[assigned_track_idx];
+                        associated_track->AddDetection(det->bbox, det->score, Rt, current_frame_idx_, kf);
+                        if (kf && associated_track->GetStatus() == ObjectTrackStatus::IN_MAP) {
+                            // std::cout << "Add modified objects" << std::endl;
+                            if (local_object_mapper_)
+                                local_object_mapper_->InsertModifiedObject(associated_track->GetMapObject());
+                        }
+                    }
+                }
+
+                for (auto tr : new_tracks)
+                    objectTracks_.push_back(tr);
+
+
+                if (!mbOnlyTracking) {
+                    for (auto& tr : objectTracks_) {
+                        if (tr->GetLastObsFrameId() == current_frame_idx_) {
+                            // Try reconstruct from points
+                            if ((tr->GetNbObservations() > 10 && tr->GetStatus() == ObjectTrackStatus::ONLY_2D) ||
+                                (tr->GetNbObservations() % 2 == 0 && tr->GetStatus() == ObjectTrackStatus::INITIALIZED)) {
+                                // tr->ReconstructFromSamplesEllipsoid();
+                                // tr->ReconstructFromSamplesCenter();
+
+                            bool status_rec = tr->ReconstructFromCenter(); // try to reconstruct and change status to INITIALIZED if success
+                            // tr->ReconstructFromLandmarks(mpMap);
+                            // tr->ReconstructCrocco(false); // not working
+                            if (status_rec)
+                                tr->OptimizeReconstruction(mpMap);
+                            }
+                        }
+
+                        // Try to optimize objects and insert in the map
+                        if (tr->GetNbObservations() >= 40 && tr->GetStatus() == ObjectTrackStatus::INITIALIZED) {
+                            tr->OptimizeReconstruction(mpMap);
+                            // std::cout << "First opimitzation done.\n";
+                            auto checked = tr->CheckReprojectionIoU(0.3);
+                            // std::cout << "Check reprojection " << checked << ".\n";
+                            if (checked) {
+                                // Add object to map
+                                tr->InsertInMap(mpMap);
+                                // Add object in the local object mapping thread to run a fusion checking
+                                if (local_object_mapper_)
+                                    local_object_mapper_->InsertModifiedObject(tr->GetMapObject());
+                            } else {
+                                tr->SetIsBad(); // or only reset to ONLY_2D ?
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!mbOnlyTracking) {
+                // Remove objects that are not tracked anymore and not initialized or in the map
+                for (ObjectTrack::Ptr tr : objectTracks_) {
+                    if (static_cast<int>(tr->GetLastObsFrameId()) < static_cast<int>(current_frame_idx_) - TIME_DIFF_THRESH
+                        && tr->GetStatus() != ObjectTrackStatus::IN_MAP) {
+                            tr->SetIsBad();
+                        }
+                }
+
+                // Clean bad objects
+                auto tr_it = objectTracks_.begin();
+                while (tr_it != objectTracks_.end()) {
+                    auto temp = *tr_it;
+                    ++tr_it;
+                    if (temp->IsBad())
+                        RemoveTrack(temp);
+                }
+            }
+        }
+
+        // std::cout << "Object Tracks: " << objectTracks_.size() << "\n";
+        mpFrameDrawer->Update(this);
+    }
+
+    if (mpARViewer) { // Update AR viewer camera
+        mpARViewer->UpdateFrame(im_rgb_);
+        if (mCurrentFrame.mTcw.rows == 4)
+            mpARViewer->SetCurrentCameraPose(cvToEigenMatrix<double, float, 3, 4>(mCurrentFrame.mTcw));
+    }
 
     return mCurrentFrame.mTcw.clone();
 }
@@ -321,7 +667,7 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
 
     for (auto det : current_frame_detections_) {
         // CASE 1: Vật động (VD: người, class 0) -> Chỉ dùng để tạo Mask lọc Keypoint
-        if (det->category_id == KEYBOARD_CATEGORY_ID) { // Thay bằng 0 nếu là người
+        if (det->category_id == PEOPLE_CATEGORY_ID) { // Thay bằng 0 nếu là người
              if (!det->mask.empty()) {
                  cv::bitwise_or(total_mask, det->mask, total_mask);
              }

@@ -206,7 +206,7 @@ cv::Mat System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const
     return Tcw;
 }
 
-cv::Mat System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const double &timestamp)
+cv::Mat System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const double &timestamp, std::vector<ORB_SLAM2::Detection::Ptr> &detections, bool force_relocalize)
 {
     if(mSensor!=RGBD)
     {
@@ -248,7 +248,23 @@ cv::Mat System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const doub
     }
     }
 
-    cv::Mat Tcw = mpTracker->GrabImageRGBD(im,depthmap,timestamp);
+    // Check if need pause
+    if (mpViewer) {
+        while(mpViewer->isPaused()
+            && !mpViewer->isStopped()
+            && !mpViewer->isFinished()){
+                usleep(90000);
+        }
+    }
+
+    // Check if quit
+    if (mpViewer && mpViewer->CheckFinish())
+    {
+        std::cout << "SHUTDOWN" << std::endl;
+        mShouldQuit = true;
+    }
+
+    cv::Mat Tcw = mpTracker->GrabImageRGBD(im,depthmap,timestamp, detections, force_relocalize);
 
     unique_lock<mutex> lock2(mMutexState);
     mTrackingState = mpTracker->mState;

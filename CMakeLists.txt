@@ -112,3 +112,5 @@ add_executable(oa-slam_localization
 Examples/oa-slam_localization.cc)
 target_link_libraries(oa-slam_localization ${PROJECT_NAME})
 
+add_executable(oa-slam_rgb-d-offline Examples/oa-slam-rgb-d-offline.cc)
+target_link_libraries(oa-slam_rgb-d-offline ${PROJECT_NAME})
