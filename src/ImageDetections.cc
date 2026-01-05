@@ -35,32 +35,38 @@ namespace ORB_SLAM2
 // ================= HELPER FUNCTION FOR MASK GENERATION =================
 // Generates binary mask from proto masks and coefficients
 static cv::Mat generateMask(const cv::Mat& proto_masks, const std::vector<float>& coeffs) {
-    // proto_masks: [32, 160, 160] (flattened or shaped)
-    // coeffs: [32]
+    // proto_masks shape usually: [1, 32, mask_h, mask_w] or [32, mask_h, mask_w]
     
-    if (coeffs.size() != 32) {
+    int dims = proto_masks.dims;
+    int mask_h = proto_masks.size[dims - 2];
+    int mask_w = proto_masks.size[dims - 1];
+    int num_protos = proto_masks.size[dims - 3]; // Usually 32
+    int area = mask_h * mask_w;
+
+    if (coeffs.size() != num_protos) {
+        std::cerr << "[Error] Mask coeffs size mismatch. Expected " << num_protos << ", got " << coeffs.size() << std::endl;
         return cv::Mat();
     }
 
-    // Prepare mask: 160x160
-    cv::Mat mask = cv::Mat::zeros(160, 160, CV_32F);
+    // Prepare mask: Dynamic size
+    cv::Mat mask = cv::Mat::zeros(mask_h, mask_w, CV_32F);
     float* mask_ptr = (float*)mask.data;
     const float* proto_data = (const float*)proto_masks.data;
     
     // Linear combination: mask = sum(coeff[i] * proto[i])
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < num_protos; i++) {
         float coeff = coeffs[i];
-        for (int j = 0; j < 160 * 160; j++) {
-            mask_ptr[j] += coeff * proto_data[i * 160 * 160 + j];
+        for (int j = 0; j < area; j++) {
+            mask_ptr[j] += coeff * proto_data[i * area + j];
         }
     }
     
     // Sigmoid activation
-    for (int i = 0; i < 160 * 160; i++) {
+    for (int i = 0; i < area; i++) {
         mask_ptr[i] = 1.0f / (1.0f + std::exp(-mask_ptr[i]));
     }
     
-    return mask; // Returns 160x160 float mask (0.0 to 1.0)
+    return mask; // Returns mask (0.0 to 1.0) with size corresponding to model output (e.g., 80x80 for 320 input)
 }
 
 
@@ -143,7 +149,7 @@ std::vector<Detection::Ptr> ObjectDetector::detect(cv::Mat img) const
     const int INPUT_WIDTH = 640; 
     const int INPUT_HEIGHT = 640;
     const float SCORE_THRESHOLD = 0.5;
-    const float NMS_THRESHOLD = 0.45;
+    const float NMS_THRESHOLD = 0.45; 
 
     int original_width = img.cols;
     int original_height = img.rows;

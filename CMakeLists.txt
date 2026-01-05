@@ -114,3 +114,41 @@ target_link_libraries(oa-slam_localization ${PROJECT_NAME})
 
 add_executable(oa-slam_rgb-d-offline Examples/oa-slam-rgb-d-offline.cc)
 target_link_libraries(oa-slam_rgb-d-offline ${PROJECT_NAME})
+
+
+# ... (Phần cuối file CMakeLists.txt)
+
+# --- ROS 2 Integration ---
+# Tìm các gói ROS 2 cần thiết
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(image_transport REQUIRED)
+find_package(message_filters REQUIRED)
+
+# Thêm đường dẫn include cho ROS 2
+include_directories(
+    ${rclcpp_INCLUDE_DIRS}
+    ${sensor_msgs_INCLUDE_DIRS}
+    ${cv_bridge_INCLUDE_DIRS}
+    /opt/ros/humble/include/cv_bridge  # [FIX] Thêm dòng này để tìm thấy <cv_bridge/cv_bridge.h>
+    ${image_transport_INCLUDE_DIRS}
+    ${message_filters_INCLUDE_DIRS}
+)
+
+# Tạo executable cho ROS node
+add_executable(ros_oa_slam_rgbd Examples/ros_oa_slam_rgbd.cc)
+
+# Link thư viện OA-SLAM và các thư viện ROS 2
+target_link_libraries(ros_oa_slam_rgbd 
+    ${PROJECT_NAME}
+    rclcpp::rclcpp
+    ${sensor_msgs_LIBRARIES}
+    /opt/ros/humble/lib/libcv_bridge.so  # [FIX] Trỏ thẳng vào file thư viện .so
+    ${message_filters_LIBRARIES}
+    ${image_transport_LIBRARIES}
+)
+# Fix lỗi C++ standard nếu cần (ROS 2 Humble cần C++17, Foxy cần C++14)
+# Nếu build bị lỗi standard, bỏ comment dòng dưới:
+# target_compile_features(ros_oa_slam_rgbd PUBLIC cxx_std_17)

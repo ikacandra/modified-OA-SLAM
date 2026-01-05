@@ -78,9 +78,10 @@ using std::chrono::duration_cast;
 using std::chrono::duration;
 using std::chrono::milliseconds;
 
-#define PEOPLE_CATEGORY_ID 0
+#define OBJECT_CATEGORY_ID MONITOR_CATEGORY_ID
 #define KEYBOARD_CATEGORY_ID 66
 #define MONITOR_CATEGORY_ID 62
+#define PEOPLE_CATEGORY_ID 0
 
 namespace ORB_SLAM2
 {
@@ -290,7 +291,7 @@ cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const d
 
     for (auto det : current_frame_detections_) {
         // CASE 1: Vật động (VD: người, class 0) -> Chỉ dùng để tạo Mask lọc Keypoint
-        if (det->category_id == PEOPLE_CATEGORY_ID) { // Thay bằng 0 nếu là người
+        if (det->category_id == OBJECT_CATEGORY_ID) { // Thay bằng 0 nếu là người
              if (!det->mask.empty()) {
                  cv::bitwise_or(total_mask, det->mask, total_mask);
              }
@@ -667,7 +668,7 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
 
     for (auto det : current_frame_detections_) {
         // CASE 1: Vật động (VD: người, class 0) -> Chỉ dùng để tạo Mask lọc Keypoint
-        if (det->category_id == PEOPLE_CATEGORY_ID) { // Thay bằng 0 nếu là người
+        if (det->category_id == OBJECT_CATEGORY_ID) { // Thay bằng 0 nếu là người
              if (!det->mask.empty()) {
                  cv::bitwise_or(total_mask, det->mask, total_mask);
              }

@@ -150,9 +150,9 @@ int main(int argc, char **argv)
         std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
         
         std::string filenameIm = path_to_sequence + vstrImageFilenamesRGB[ni];
-        std::cout << "Processing image: " << filenameIm << "\n";
+        //std::cout << "Processing image: " << filenameIm << "\n";
         std::string filenameD = path_to_sequence + vstrImageFilenamesD[ni];
-        std::cout << "Processing depth: " << filenameD << "\n";
+        //std::cout << "Processing depth: " << filenameD << "\n";
 
         imRGB = cv::imread(filenameIm, cv::IMREAD_UNCHANGED);
         imD = cv::imread(filenameD, cv::IMREAD_UNCHANGED);
