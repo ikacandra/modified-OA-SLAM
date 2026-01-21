@@ -78,10 +78,13 @@ using std::chrono::duration_cast;
 using std::chrono::duration;
 using std::chrono::milliseconds;
 
-#define OBJECT_CATEGORY_ID MONITOR_CATEGORY_ID
-#define KEYBOARD_CATEGORY_ID 66
-#define MONITOR_CATEGORY_ID 62
-#define PEOPLE_CATEGORY_ID 0
+#define OBJECT_CATEGORY_ID  PERSON_CATEGORY_ID  // Thay bằng 0 nếu muốn coi người là vật động
+
+#define APRILTAG_CATEGORY_ID    0
+#define CHAIR_CATEGORY_ID       1
+#define DOOR_CATEGORY_ID        2
+#define PERSON_CATEGORY_ID      3
+#define POTTEDPLANT_CATEGORY_ID 4
 
 namespace ORB_SLAM2
 {

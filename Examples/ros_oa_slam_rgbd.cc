@@ -78,7 +78,7 @@ ImageGrabber::ImageGrabber(const string& vocab_path, const string& settings_path
     depth_sub_.subscribe(this, topic_depth);
 
     // Nếu System cần cấu hình Reloc Mode ngay khi khởi tạo, bạn có thể cần set ở đây
-    // Ví dụ: mpSLAM->SetRelocalizationMode(reloc_mode); (Nếu hàm này tồn tại)
+    mpSLAM->SetRelocalizationMode(reloc_mode);
 
     // Create synchronizer
     // Queue size 10
