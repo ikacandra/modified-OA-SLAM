@@ -322,7 +322,25 @@ cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const d
 
     
     mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth, total_mask);
-    
+
+    // Populate AprilTag bounding boxes (class_id = 0) for weighted pose optimization
+    const int APRILTAG_CLASS_ID = 0;
+    mCurrentFrame.mvAprilTagBboxes.clear();
+    for (const auto& det : current_frame_detections_) {
+        if (det->category_id == APRILTAG_CLASS_ID && det->score > 0.5) {
+            // BBox2 = Eigen::Vector4d (xmin, ymin, xmax, ymax)
+            int xmin = static_cast<int>(det->bbox[0]);
+            int ymin = static_cast<int>(det->bbox[1]);
+            int width = static_cast<int>(det->bbox[2] - det->bbox[0]);
+            int height = static_cast<int>(det->bbox[3] - det->bbox[1]);
+            // Only add valid bounding boxes
+            if (width > 0 && height > 0 && xmin >= 0 && ymin >= 0) {
+                cv::Rect rect(xmin, ymin, width, height);
+                mCurrentFrame.mvAprilTagBboxes.push_back(rect);
+            }
+        }
+    }
+
     if (force_relocalize)
     {
         auto t1 = high_resolution_clock::now();

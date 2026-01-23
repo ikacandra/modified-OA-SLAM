@@ -187,6 +187,8 @@ public:
 
     static bool mbInitialComputations;
 
+    // AprilTag bounding boxes for weighted pose optimization
+    std::vector<cv::Rect> mvAprilTagBboxes;
 
 private:
 

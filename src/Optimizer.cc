@@ -294,6 +294,20 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     const float deltaMono = sqrt(5.991);
     const float deltaStereo = sqrt(7.815);
 
+    // AprilTag weight factor for keypoints inside AprilTag bboxes (moderate value to avoid NaN)
+    const float APRILTAG_WEIGHT_FACTOR = 2.0f;
+    
+    // Helper lambda to check if keypoint is inside any AprilTag bbox
+    auto isInsideAprilTag = [&](const cv::Point2f& pt) -> bool {
+        for (const auto& bbox : pFrame->mvAprilTagBboxes) {
+            if (bbox.width > 0 && bbox.height > 0 &&
+                pt.x >= bbox.x && pt.x <= bbox.x + bbox.width &&
+                pt.y >= bbox.y && pt.y <= bbox.y + bbox.height) {
+                return true;
+            }
+        }
+        return false;
+    };
 
     {
     unique_lock<mutex> lock(MapPoint::mGlobalMutex);
@@ -353,7 +367,13 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
                 e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
                 e->setMeasurement(obs);
-                const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];
+                float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];
+                // Increase weight for keypoints inside AprilTag bboxes
+                if (!pFrame->mvAprilTagBboxes.empty() && isInsideAprilTag(kpUn.pt)) {
+                    invSigma2 *= APRILTAG_WEIGHT_FACTOR;
+                }
+                // Clamp to avoid numerical instability
+                //if (invSigma2 > 1e6f) invSigma2 = 1e6f;
                 Eigen::Matrix3d Info = Eigen::Matrix3d::Identity()*invSigma2;
                 e->setInformation(Info);
 
