@@ -35,7 +35,8 @@ public:
                  const string &topic_rgb, const string &topic_depth, 
                  std::shared_ptr<ORB_SLAM2::ImageDetectionsManager> detector,
                  ORB_SLAM2::System::eSensor sensor,
-                 ORB_SLAM2::enumRelocalizationMode reloc_mode); // Thêm tham số reloc_mode
+                 ORB_SLAM2::enumRelocalizationMode reloc_mode,
+                 const string& output_folder);
 
     ~ImageGrabber();
 
@@ -47,6 +48,7 @@ public:
 private:
     std::shared_ptr<ORB_SLAM2::ImageDetectionsManager> mpDetector;
     ORB_SLAM2::enumRelocalizationMode mRelocMode;
+    std::string mOutputFolder;
 
     // Message filters
     message_filters::Subscriber<sensor_msgs::msg::Image> rgb_sub_;
@@ -62,10 +64,12 @@ ImageGrabber::ImageGrabber(const string& vocab_path, const string& settings_path
                            const string &topic_rgb, const string &topic_depth,
                            std::shared_ptr<ORB_SLAM2::ImageDetectionsManager> detector,
                            ORB_SLAM2::System::eSensor sensor,
-                           ORB_SLAM2::enumRelocalizationMode reloc_mode)
+                           ORB_SLAM2::enumRelocalizationMode reloc_mode,
+                           const string& output_folder)
     : rclcpp::Node("oa_slam_rgbd"),
       mpDetector(detector),
-      mRelocMode(reloc_mode)
+      mRelocMode(reloc_mode),
+      mOutputFolder(output_folder)
 {
     
     // Create SLAM system. 
@@ -94,13 +98,60 @@ ImageGrabber::ImageGrabber(const string& vocab_path, const string& settings_path
 
 ImageGrabber::~ImageGrabber()
 {
+    std::cout << "\n=== OA-SLAM Shutting down ===" << std::endl;
+    
     if (mpSLAM)
     {
         mpSLAM->Shutdown();
-        // Save trajectory if needed
-        // mpSLAM->SaveKeyFrameTrajectoryTUM("KeyFrameTrajectory.txt");
+        
+        // Create output folder if it doesn't exist
+        if (!mOutputFolder.empty()) {
+            std::cout << "Creating output folder: " << mOutputFolder << std::endl;
+            std::string cmd = "mkdir -p " + mOutputFolder;
+            int ret = system(cmd.c_str());
+            if (ret != 0) {
+                std::cerr << "Warning: Failed to create output folder" << std::endl;
+            }
+        }
+        
+        // Save trajectory and map data
+        if (!mOutputFolder.empty()) {
+            std::cout << "Saving trajectory and map to: " << mOutputFolder << std::endl;
+            
+            // Ensure output folder ends with /
+            string output_path = mOutputFolder;
+            if (output_path.back() != '/') {
+                output_path += "/";
+            }
+            
+            try {
+                // Save trajectories
+                mpSLAM->SaveKeyFrameTrajectoryTUM(output_path + "keyframes_poses_tum.txt");
+                std::cout << "  - Saved: keyframes_poses_tum.txt" << std::endl;
+                
+                // Save map points and objects
+                mpSLAM->SaveMapPointsOBJ(output_path + "map_points.obj");
+                std::cout << "  - Saved: map_points.obj" << std::endl;
+                
+                mpSLAM->SaveMapObjectsOBJ(output_path + "map_objects.obj");
+                std::cout << "  - Saved: map_objects.obj" << std::endl;
+                
+                mpSLAM->SaveMapObjectsTXT(output_path + "map_objects.txt");
+                std::cout << "  - Saved: map_objects.txt" << std::endl;
+                
+                std::cout << "Trajectory and map saved successfully!" << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Error saving trajectory: " << e.what() << std::endl;
+            }
+        } else {
+            std::cout << "No output folder specified, skipping save" << std::endl;
+        }
+        
         delete mpSLAM;
+        mpSLAM = nullptr;
     }
+    
+    std::cout << "=== OA-SLAM Shutdown complete ===" << std::endl;
 }
 
 void ImageGrabber::GrabRGBD(const sensor_msgs::msg::Image::ConstSharedPtr& msgRGB,
@@ -214,9 +265,15 @@ int main(int argc, char* argv[])
                                           topic_rgb, topic_depth, 
                                           detector, 
                                           ORB_SLAM2::System::RGBD, 
-                                          relocalization_mode);
+                                          relocalization_mode,
+                                          output_folder);
 
     rclcpp::spin(node);
+    
+    // Explicitly trigger destructor before shutdown to ensure trajectory is saved
+    std::cout << "Stopping OA-SLAM and saving trajectory..." << std::endl;
+    node.reset();  // This triggers ~ImageGrabber() destructor
+    
     rclcpp::shutdown();
 
     return 0;

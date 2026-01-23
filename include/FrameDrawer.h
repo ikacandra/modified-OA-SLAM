@@ -128,6 +128,9 @@ protected:
     std::mutex mMutex;
     bool use_category_cols_ = false;
     int frame_id_;
+    
+    // AprilTag bounding boxes for visualization (red keypoints)
+    std::vector<cv::Rect> mvAprilTagBboxes;
 };
 
 } //namespace ORB_SLAM

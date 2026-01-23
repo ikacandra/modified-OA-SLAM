@@ -117,6 +117,18 @@ cv::Mat FrameDrawer::DrawFrame()
         mnTrackedVO=0;
         const float r = 5;
         const int n = vCurrentKeys.size();
+        
+        // Helper lambda to check if keypoint is inside AprilTag bbox
+        auto isInsideAprilTagBbox = [&](const cv::Point2f& pt) -> bool {
+            for (const auto& bbox : mvAprilTagBboxes) {
+                if (pt.x >= bbox.x && pt.x <= bbox.x + bbox.width &&
+                    pt.y >= bbox.y && pt.y <= bbox.y + bbox.height) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        
         for(int i=0;i<n;i++)
         {
             if(vbVO[i] || vbMap[i])
@@ -127,14 +139,21 @@ cv::Mat FrameDrawer::DrawFrame()
                 pt2.x=vCurrentKeys[i].pt.x+r;
                 pt2.y=vCurrentKeys[i].pt.y+r;
 
-                // This is a match to a MapPoint in the map
-                if(vbMap[i])
+                // Check if keypoint is inside AprilTag bbox (highest priority - red)
+                if (!mvAprilTagBboxes.empty() && isInsideAprilTagBbox(vCurrentKeys[i].pt))
+                {
+                    cv::rectangle(im,pt1,pt2,cv::Scalar(0,0,255));
+                    cv::circle(im,vCurrentKeys[i].pt,2,cv::Scalar(0,0,255),-1);
+                }
+                // This is a match to a MapPoint in the map (green)
+                else if(vbMap[i])
                 {
                     cv::rectangle(im,pt1,pt2,cv::Scalar(0,255,0));
                     cv::circle(im,vCurrentKeys[i].pt,2,cv::Scalar(0,255,0),-1);
                     mnTracked++;
                 }
-                else // This is match to a "visual odometry" MapPoint created in the last frame
+                // This is match to a "visual odometry" MapPoint created in the last frame (blue)
+                else
                 {
                     cv::rectangle(im,pt1,pt2,cv::Scalar(255,0,0));
                     cv::circle(im,vCurrentKeys[i].pt,2,cv::Scalar(255,0,0),-1);
@@ -202,6 +221,9 @@ void FrameDrawer::Update(Tracking *pTracker)
     mvbMap = vector<bool>(N,false);
     mbOnlyTracking = pTracker->mbOnlyTracking;
     frame_id_ = pTracker->GetCurrentFrameIdx();
+    
+    // Copy AprilTag bboxes for visualization
+    mvAprilTagBboxes = pTracker->mCurrentFrame.mvAprilTagBboxes;
 
 
     if(pTracker->mLastProcessedState==Tracking::NOT_INITIALIZED)
