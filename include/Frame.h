@@ -190,6 +190,9 @@ public:
     // AprilTag bounding boxes for weighted pose optimization
     std::vector<cv::Rect> mvAprilTagBboxes;
 
+    // Static object segmentation mask for weighted pose optimization (weight = 1.5)
+    cv::Mat mStaticObjectMask;
+
 private:
 
     // Undistort keypoints given OpenCV distortion parameters.

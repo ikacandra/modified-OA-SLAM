@@ -289,28 +289,32 @@ cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const d
     current_frame_detections_ = detections;
     current_frame_good_detections_.clear(); // Đây sẽ là danh sách vật tĩnh dùng cho SLAM
 
-    // [OA-SLAM] Create total mask for dynamic objects
+    // [OA-SLAM] Create total mask for dynamic objects (to filter out keypoints)
     cv::Mat total_mask = cv::Mat::zeros(imRGB.rows, imRGB.cols, CV_8UC1);
+    
+    // [ADAPTIVE WEIGHT] Create mask for static objects (weight = 1.5)
+    cv::Mat static_object_mask = cv::Mat::zeros(imRGB.rows, imRGB.cols, CV_8UC1);
 
     for (auto det : current_frame_detections_) {
-        // CASE 1: Vật động (VD: người, class 0) -> Chỉ dùng để tạo Mask lọc Keypoint
-        if (det->category_id == OBJECT_CATEGORY_ID) { // Thay bằng 0 nếu là người
-             if (!det->mask.empty()) {
-                 cv::bitwise_or(total_mask, det->mask, total_mask);
-             }
-             // KHÔNG push vào current_frame_good_detections_ -> SLAM sẽ lờ đi
-             continue; 
+        // CASE 1: PERSON → mask + continue (không dùng cho SLAM)
+        if (det->category_id == PERSON_CATEGORY_ID) {
+            if (!det->mask.empty()) {
+                cv::bitwise_or(total_mask, det->mask, total_mask);
+            }
+            continue;
         }
-
-        // CASE 2: Vật tĩnh (đủ score) -> Dùng cho Object SLAM
+        
+        // CASE 2 & 3: AprilTag + Static objects → push vào good_detections
         if (det->score > 0.5) {
-            current_frame_good_detections_.push_back(det);
+            current_frame_good_detections_.push_back(det);  // ✅ Cả AprilTag và Static
             
-            // Nếu bạn muốn mask cả vật tĩnh (để tránh keypoint trên vật tĩnh) thì uncomment dòng dưới:
-            // if (!det->mask.empty()) cv::bitwise_or(total_mask, det->mask, total_mask);
+            // Chỉ Static objects thêm mask (AprilTag dùng bbox riêng)
+            if (det->category_id != APRILTAG_CATEGORY_ID && !det->mask.empty()) {
+                cv::bitwise_or(static_object_mask, det->mask, static_object_mask);
+            }
         }
     }
-
+    
     // Optional: Dilate the total mask to cover boundaries significantly
     if (cv::countNonZero(total_mask) > 0) {
         cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(15, 15));
@@ -322,6 +326,9 @@ cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const d
 
     
     mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth, total_mask);
+
+    // [ADAPTIVE WEIGHT] Assign static object mask to Frame
+    mCurrentFrame.mStaticObjectMask = static_object_mask.clone();
 
     // Populate AprilTag bounding boxes (class_id = 0) for weighted pose optimization
     const int APRILTAG_CLASS_ID = 0;

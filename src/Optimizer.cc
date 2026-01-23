@@ -1,4 +1,4 @@
-﻿/**
+/**
 * This file is part of OA-SLAM.
 *
 * Copyright (C) 2022 Matthieu Zins <matthieu.zins@inria.fr>
@@ -294,8 +294,10 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     const float deltaMono = sqrt(5.991);
     const float deltaStereo = sqrt(7.815);
 
-    // AprilTag weight factor for keypoints inside AprilTag bboxes (moderate value to avoid NaN)
-    const float APRILTAG_WEIGHT_FACTOR = 2.0f;
+    // [ADAPTIVE WEIGHT] Weight factors for different semantic categories
+    const float APRILTAG_WEIGHT_FACTOR = 2.0f;        // Fiducial markers - highest trust
+    const float STATIC_OBJECT_WEIGHT_FACTOR = 1.5f;   // Static objects (rigid) - medium trust
+    // Background keypoints keep default weight = 1.0
     
     // Helper lambda to check if keypoint is inside any AprilTag bbox
     auto isInsideAprilTag = [&](const cv::Point2f& pt) -> bool {
@@ -307,6 +309,23 @@ int Optimizer::PoseOptimization(Frame *pFrame)
             }
         }
         return false;
+    };
+    
+    // Helper lambda to check if keypoint is inside static object mask
+    auto isInsideStaticObjectMask = [&](const cv::Point2f& pt) -> bool {
+        if (pFrame->mStaticObjectMask.empty()) return false;
+        
+        int x = static_cast<int>(pt.x);
+        int y = static_cast<int>(pt.y);
+        
+        // Boundary check
+        if (x < 0 || x >= pFrame->mStaticObjectMask.cols ||
+            y < 0 || y >= pFrame->mStaticObjectMask.rows) {
+            return false;
+        }
+        
+        // Check pixel value in mask (> 0 = inside static object)
+        return pFrame->mStaticObjectMask.at<uchar>(y, x) > 0;
     };
 
     {
@@ -368,12 +387,13 @@ int Optimizer::PoseOptimization(Frame *pFrame)
                 e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
                 e->setMeasurement(obs);
                 float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];
-                // Increase weight for keypoints inside AprilTag bboxes
+                // [ADAPTIVE WEIGHT] Increase weight based on semantic category
                 if (!pFrame->mvAprilTagBboxes.empty() && isInsideAprilTag(kpUn.pt)) {
-                    invSigma2 *= APRILTAG_WEIGHT_FACTOR;
+                    invSigma2 *= APRILTAG_WEIGHT_FACTOR;      // AprilTag: weight = 2.0
+                } else if (isInsideStaticObjectMask(kpUn.pt)) {
+                    invSigma2 *= STATIC_OBJECT_WEIGHT_FACTOR; // Static object: weight = 1.5
                 }
-                // Clamp to avoid numerical instability
-                //if (invSigma2 > 1e6f) invSigma2 = 1e6f;
+                // else: Background keeps default weight = 1.0
                 Eigen::Matrix3d Info = Eigen::Matrix3d::Identity()*invSigma2;
                 e->setInformation(Info);
 
