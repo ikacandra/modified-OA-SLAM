@@ -1,81 +1,84 @@
 /**
-* This file is part of OA-SLAM.
+* This file is part of ORB-SLAM3
 *
-* Copyright (C) 2022 Matthieu Zins <matthieu.zins@inria.fr>
-* (Inria, LORIA, Université de Lorraine)
-* OA-SLAM is free software: you can redistribute it and/or modify
-* it under the terms of the GNU General Public License as published by
-* the Free Software Foundation, either version 3 of the License, or
+* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+*
+* ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+* License as published by the Free Software Foundation, either version 3 of the License, or
 * (at your option) any later version.
 *
-* OA-SLAM is distributed in the hope that it will be useful,
-* but WITHOUT ANY WARRANTY; without even the implied warranty of
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+* ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+* the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 * GNU General Public License for more details.
 *
-* You should have received a copy of the GNU General Public License
-* along with OA-SLAM. If not, see <http://www.gnu.org/licenses/>.
-*/
-
-
-/**
-* This file is part of ORB-SLAM2.
-*
-* Copyright (C) 2014-2016 Raúl Mur-Artal <raulmur at unizar dot es> (University of Zaragoza)
-* For more information see <https://github.com/raulmur/ORB_SLAM2>
-*
-* ORB-SLAM2 is free software: you can redistribute it and/or modify
-* it under the terms of the GNU General Public License as published by
-* the Free Software Foundation, either version 3 of the License, or
-* (at your option) any later version.
-*
-* ORB-SLAM2 is distributed in the hope that it will be useful,
-* but WITHOUT ANY WARRANTY; without even the implied warranty of
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-* GNU General Public License for more details.
-*
-* You should have received a copy of the GNU General Public License
-* along with ORB-SLAM2. If not, see <http://www.gnu.org/licenses/>.
+* You should have received a copy of the GNU General Public License along with ORB-SLAM3.
+* If not, see <http://www.gnu.org/licenses/>.
 */
 
 
 #ifndef SYSTEM_H
 #define SYSTEM_H
 
+
+#include <unistd.h>
+#include<stdio.h>
+#include<stdlib.h>
 #include<string>
 #include<thread>
 #include<opencv2/core/core.hpp>
 
 #include "Tracking.h"
 #include "FrameDrawer.h"
-#include "ImageDetections.h"
 #include "MapDrawer.h"
-#include "Map.h"
+#include "Atlas.h"
 #include "LocalMapping.h"
 #include "LoopClosing.h"
 #include "KeyFrameDatabase.h"
 #include "ORBVocabulary.h"
-#include <unistd.h>
+#include "Viewer.h"
+#include "ImuTypes.h"
+#include "Settings.h"
 
-namespace ORB_SLAM2
+
+namespace ORB_SLAM3
 {
 
+class Verbose
+{
+public:
+    enum eLevel
+    {
+        VERBOSITY_QUIET=0,
+        VERBOSITY_NORMAL=1,
+        VERBOSITY_VERBOSE=2,
+        VERBOSITY_VERY_VERBOSE=3,
+        VERBOSITY_DEBUG=4
+    };
+
+    static eLevel th;
+
+public:
+    static void PrintMess(std::string str, eLevel lev)
+    {
+        if(lev <= th)
+            cout << str << endl;
+    }
+
+    static void SetTh(eLevel _th)
+    {
+        th = _th;
+    }
+};
+
 class Viewer;
-class ARViewer;
 class FrameDrawer;
-class Map;
+class MapDrawer;
+class Atlas;
 class Tracking;
 class LocalMapping;
-class LocalObjectMapping;
 class LoopClosing;
-class Detection;
-
-
-enum enumRelocalizationMode {
-    RELOC_POINTS,
-    RELOC_OBJECTS,
-    RELOC_OBJECTS_POINTS
-};
+class Settings;
 
 class System
 {
@@ -84,29 +87,39 @@ public:
     enum eSensor{
         MONOCULAR=0,
         STEREO=1,
-        RGBD=2
+        RGBD=2,
+        IMU_MONOCULAR=3,
+        IMU_STEREO=4,
+        IMU_RGBD=5,
+    };
+
+    // File type
+    enum FileType{
+        TEXT_FILE=0,
+        BINARY_FILE=1,
     };
 
 public:
-
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     // Initialize the SLAM system. It launches the Local Mapping, Loop Closing and Viewer threads.
-    System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor, const bool bUseViewer=true, const bool bUseARViewer=false, int use_objects_in_local_BA=0);
+    System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor, const bool bUseViewer = true, const int initFr = 0, const string &strSequence = std::string());
 
     // Proccess the given stereo frame. Images must be synchronized and rectified.
     // Input images: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
     // Returns the camera pose (empty if tracking fails).
-    cv::Mat TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp);
+    Sophus::SE3f TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
 
     // Process the given rgbd frame. Depthmap must be registered to the RGB frame.
     // Input image: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
     // Input depthmap: Float (CV_32F).
     // Returns the camera pose (empty if tracking fails).
-    cv::Mat TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const double &timestamp, std::vector<ORB_SLAM2::Detection::Ptr>& detections, bool force_relocalize);
+    Sophus::SE3f TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
 
-    // Proccess the given monocular frame
+    // Proccess the given monocular frame and optionally imu data
     // Input images: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
     // Returns the camera pose (empty if tracking fails).
-    cv::Mat TrackMonocular(const cv::Mat &im, const double &timestamp, const std::vector<Detection::Ptr>& detections, bool force_relocalize);
+    Sophus::SE3f TrackMonocular(const cv::Mat &im, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
+
 
     // This stops local mapping thread (map building) and performs only camera tracking.
     void ActivateLocalizationMode();
@@ -117,13 +130,15 @@ public:
     // since last call to this function
     bool MapChanged();
 
-    // Reset the system (clear map)
+    // Reset the system (clear Atlas or the active map)
     void Reset();
+    void ResetActiveMap();
 
     // All threads will be requested to finish.
     // It waits until all threads have finished.
     // This function must be called before saving the trajectory.
     void Shutdown();
+    bool isShutDown();
 
     // Save camera trajectory in the TUM RGB-D dataset format.
     // Only for stereo and RGB-D. This method does not work for monocular.
@@ -137,14 +152,20 @@ public:
     // See format details at: http://vision.in.tum.de/data/datasets/rgbd-dataset
     void SaveKeyFrameTrajectoryTUM(const string &filename);
 
+    void SaveTrajectoryEuRoC(const string &filename);
+    void SaveKeyFrameTrajectoryEuRoC(const string &filename);
+
+    void SaveTrajectoryEuRoC(const string &filename, Map* pMap);
+    void SaveKeyFrameTrajectoryEuRoC(const string &filename, Map* pMap);
+
+    // Save data used for initialization debug
+    void SaveDebugData(const int &iniIdx);
+
     // Save camera trajectory in the KITTI dataset format.
     // Only for stereo and RGB-D. This method does not work for monocular.
     // Call first Shutdown()
     // See format details at: http://www.cvlibs.net/datasets/kitti/eval_odometry.php
     void SaveTrajectoryKITTI(const string &filename);
-
-    void SaveKeyFrameTrajectoryJSON(const string &filename, const std::vector<std::string>& frames_filenames);
-
 
     // TODO: Save/Load functions
     // SaveMap(const string &filename);
@@ -156,31 +177,27 @@ public:
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
 
-    void SaveMapPointsOBJ(const string &filename);
+    // For debugging
+    double GetTimeFromIMUInit();
+    bool isLost();
+    bool isFinished();
 
-    // Close the map viewer (it otherwise waits for the user to press Quit).
-    // Call before Shutdown() for unattended runs.
-    void RequestViewerFinish();
+    void ChangeDataset();
 
-    bool ShouldQuit() const {
-         return mShouldQuit;
-    }
+    float GetImageScale();
 
-    void SaveMapObjectsOBJ(const string& filename);
-    void SaveMapObjectsTXT(const std::string& filename);
+#ifdef REGISTER_TIMES
+    void InsertRectTime(double& time);
+    void InsertResizeTime(double& time);
+    void InsertTrackTime(double& time);
+#endif
 
-    void SetRelocalizationMode(enumRelocalizationMode mode) {
-        reloc_mode_ = mode;
-    }
+private:
 
-    enumRelocalizationMode GetRelocalizationMode() const {
-        return reloc_mode_;
-    }
+    void SaveAtlas(int type);
+    bool LoadAtlas(int type);
 
-    // remove the n-th object of the category cat from the map
-    void remove_nth_object_by_cat(int cat, int nth);
-
-// private:
+    string CalculateCheckSum(string filename, int type);
 
     // Input sensor
     eSensor mSensor;
@@ -192,7 +209,8 @@ public:
     KeyFrameDatabase* mpKeyFrameDatabase;
 
     // Map structure that stores the pointers to all KeyFrames and MapPoints.
-    Map* mpMap;
+    //Map* mpMap;
+    Atlas* mpAtlas;
 
     // Tracker. It receives a frame and computes the associated camera pose.
     // It also decides when to insert a new keyframe, create some new MapPoints and
@@ -208,28 +226,28 @@ public:
 
     // The viewer draws the map and the current camera pose. It uses Pangolin.
     Viewer* mpViewer;
-    ARViewer* mpARViewer;
 
     FrameDrawer* mpFrameDrawer;
     MapDrawer* mpMapDrawer;
 
-    LocalObjectMapping* local_object_mapper_;
     // System threads: Local Mapping, Loop Closing, Viewer.
     // The Tracking thread "lives" in the main execution thread that creates the System object.
     std::thread* mptLocalMapping;
-    std::thread* local_object_mapping_;
     std::thread* mptLoopClosing;
     std::thread* mptViewer;
-    std::thread* mptARViewer;
 
     // Reset flag
     std::mutex mMutexReset;
     bool mbReset;
+    bool mbResetActiveMap;
 
     // Change mode flags
     std::mutex mMutexMode;
     bool mbActivateLocalizationMode;
     bool mbDeactivateLocalizationMode;
+
+    // Shutdown flag
+    bool mbShutDown;
 
     // Tracking state
     int mTrackingState;
@@ -237,14 +255,13 @@ public:
     std::vector<cv::KeyPoint> mTrackedKeyPointsUn;
     std::mutex mMutexState;
 
-    bool mShouldQuit;
+    //
+    string mStrLoadAtlasFromFile;
+    string mStrSaveAtlasToFile;
 
-    enumRelocalizationMode reloc_mode_ = enumRelocalizationMode::RELOC_POINTS;
+    string mStrVocabularyFilePath;
 
-    std::string map_folder;
-
-    double relocalization_duration = -1;
-    bool relocalization_status = false;
+    Settings* settings_;
 };
 
 }// namespace ORB_SLAM

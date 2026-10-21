@@ -1,149 +1,1153 @@
 /**
-* This file is part of OA-SLAM.
+* This file is part of ORB-SLAM3
 *
-* Copyright (C) 2022 Matthieu Zins <matthieu.zins@inria.fr>
-* (Inria, LORIA, Université de Lorraine)
-* OA-SLAM is free software: you can redistribute it and/or modify
-* it under the terms of the GNU General Public License as published by
-* the Free Software Foundation, either version 3 of the License, or
+* Copyright (C) 2017-2021 Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+* Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza.
+*
+* ORB-SLAM3 is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+* License as published by the Free Software Foundation, either version 3 of the License, or
 * (at your option) any later version.
 *
-* OA-SLAM is distributed in the hope that it will be useful,
-* but WITHOUT ANY WARRANTY; without even the implied warranty of
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+* ORB-SLAM3 is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even
+* the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 * GNU General Public License for more details.
 *
-* You should have received a copy of the GNU General Public License
-* along with OA-SLAM. If not, see <http://www.gnu.org/licenses/>.
-*/
-
-
-/**
-* This file is part of ORB-SLAM2.
-*
-* Copyright (C) 2014-2016 Raúl Mur-Artal <raulmur at unizar dot es> (University of Zaragoza)
-* For more information see <https://github.com/raulmur/ORB_SLAM2>
-*
-* ORB-SLAM2 is free software: you can redistribute it and/or modify
-* it under the terms of the GNU General Public License as published by
-* the Free Software Foundation, either version 3 of the License, or
-* (at your option) any later version.
-*
-* ORB-SLAM2 is distributed in the hope that it will be useful,
-* but WITHOUT ANY WARRANTY; without even the implied warranty of
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-* GNU General Public License for more details.
-*
-* You should have received a copy of the GNU General Public License
-* along with ORB-SLAM2. If not, see <http://www.gnu.org/licenses/>.
+* You should have received a copy of the GNU General Public License along with ORB-SLAM3.
+* If not, see <http://www.gnu.org/licenses/>.
 */
 
 
 #include "Tracking.h"
 
-#include<opencv2/core/core.hpp>
-#include<opencv2/features2d/features2d.hpp>
-
-#include"ORBmatcher.h"
-#include"FrameDrawer.h"
-#include"Converter.h"
-#include"Map.h"
-#include"Initializer.h"
-
+#include "ORBmatcher.h"
+#include "FrameDrawer.h"
+#include "Converter.h"
+#include "G2oTypes.h"
 #include "Optimizer.h"
-#include "PnPsolver.h"
-#include "Ellipsoid.h"
-#include "Ellipse.h"
-#include "MapObject.h"
-#include "LocalObjectMapping.h"
-#include "Localization.h"
-#include "System.h"
-#include "Utils.h"
-#include "ARViewer.h"
+#include "Pinhole.h"
+#include "KannalaBrandt8.h"
+#include "MLPnPsolver.h"
+#include "GeometricTools.h"
+
 #include <iostream>
 
 #include <mutex>
-#include <unordered_set>
-#include <unordered_map>
-#include <unistd.h>
-#include <Eigen/Dense>
-#include <unistd.h>
-#include <dlib/optimization/max_cost_assignment.h>
 #include <chrono>
-#include <cstdlib>
+
 
 using namespace std;
 
-using std::chrono::high_resolution_clock;
-using std::chrono::duration_cast;
-using std::chrono::duration;
-using std::chrono::milliseconds;
-
-#define OBJECT_CATEGORY_ID  PERSON_CATEGORY_ID  // Thay bằng 0 nếu muốn coi người là vật động
-
-// COCO class ids (stock yolov8n-seg). The custom-model ids were:
-// AprilTag 0, chair 1, door 2, person 3, pottedplant 4.
-// COCO has no AprilTag / door class: 1000 / 1001 are never produced, which disables
-// the AprilTag-weighted pose optimization.
-#define APRILTAG_CATEGORY_ID    1000
-#define CHAIR_CATEGORY_ID       56
-#define DOOR_CATEGORY_ID        1001
-#define PERSON_CATEGORY_ID      0
-#define POTTEDPLANT_CATEGORY_ID 58
-
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
-// Ablation parameters (object association), overridable by environment variables.
-// Defaults are the original hardcoded values.
-static double OaEnvParam(const char* name, double def)
-{
-    const char* v = std::getenv(name);
-    return v ? std::atof(v) : def;
-}
-static const double OA_IOU2D = OaEnvParam("OA_IOU2D", 0.2);
-static const double OA_IOU3D = OaEnvParam("OA_IOU3D", 0.3);
-static const int OA_MIN_OBS = static_cast<int>(OaEnvParam("OA_MIN_OBS", 10));
 
-
-Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Map *pMap, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor):
-    mState(NO_IMAGES_YET), mSensor(sensor), mbOnlyTracking(false), mbVO(false), mpORBVocabulary(pVoc),
-    mpKeyFrameDB(pKFDB), mpInitializer(static_cast<Initializer*>(NULL)), mpSystem(pSys), mpViewer(NULL),
-    mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpMap(pMap), mnLastRelocFrameId(0)
+Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
+    mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
+    mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
+    mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
+    mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
+    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
 {
-    std::cout << "EFFECTIVE OA_IOU2D = " << OA_IOU2D << "\n"
-              << "EFFECTIVE OA_IOU3D = " << OA_IOU3D << "\n"
-              << "EFFECTIVE OA_MIN_OBS = " << OA_MIN_OBS << "\n";
     // Load camera parameters from settings file
-
-    cv::FileStorage fSettings(strSettingPath, cv::FileStorage::READ);
-    float fx = fSettings["Camera.fx"];
-    float fy = fSettings["Camera.fy"];
-    float cx = fSettings["Camera.cx"];
-    float cy = fSettings["Camera.cy"];
-
-    cv::Mat K = cv::Mat::eye(3,3,CV_32F);
-    K.at<float>(0,0) = fx;
-    K.at<float>(1,1) = fy;
-    K.at<float>(0,2) = cx;
-    K.at<float>(1,2) = cy;
-    K.copyTo(mK);
-    K_ = cvToEigenMatrix<double, float, 3, 3>(mK);
-
-    cv::Mat DistCoef(4,1,CV_32F);
-    DistCoef.at<float>(0) = fSettings["Camera.k1"];
-    DistCoef.at<float>(1) = fSettings["Camera.k2"];
-    DistCoef.at<float>(2) = fSettings["Camera.p1"];
-    DistCoef.at<float>(3) = fSettings["Camera.p2"];
-    const float k3 = fSettings["Camera.k3"];
-    if(k3!=0)
-    {
-        DistCoef.resize(5);
-        DistCoef.at<float>(4) = k3;
+    if(settings){
+        newParameterLoader(settings);
     }
-    DistCoef.copyTo(mDistCoef);
+    else{
+        cv::FileStorage fSettings(strSettingPath, cv::FileStorage::READ);
 
-    mbf = fSettings["Camera.bf"];
+        bool b_parse_cam = ParseCamParamFile(fSettings);
+        if(!b_parse_cam)
+        {
+            std::cout << "*Error with the camera parameters in the config file*" << std::endl;
+        }
+
+        // Load ORB parameters
+        bool b_parse_orb = ParseORBParamFile(fSettings);
+        if(!b_parse_orb)
+        {
+            std::cout << "*Error with the ORB parameters in the config file*" << std::endl;
+        }
+
+        bool b_parse_imu = true;
+        if(sensor==System::IMU_MONOCULAR || sensor==System::IMU_STEREO || sensor==System::IMU_RGBD)
+        {
+            b_parse_imu = ParseIMUParamFile(fSettings);
+            if(!b_parse_imu)
+            {
+                std::cout << "*Error with the IMU parameters in the config file*" << std::endl;
+            }
+
+            mnFramesToResetIMU = mMaxFrames;
+        }
+
+        if(!b_parse_cam || !b_parse_orb || !b_parse_imu)
+        {
+            std::cerr << "**ERROR in the config file, the format is not correct**" << std::endl;
+            try
+            {
+                throw -1;
+            }
+            catch(exception &e)
+            {
+
+            }
+        }
+    }
+
+    initID = 0; lastID = 0;
+    mbInitWith3KFs = false;
+    mnNumDataset = 0;
+
+    vector<GeometricCamera*> vpCams = mpAtlas->GetAllCameras();
+    std::cout << "There are " << vpCams.size() << " cameras in the atlas" << std::endl;
+    for(GeometricCamera* pCam : vpCams)
+    {
+        std::cout << "Camera " << pCam->GetId();
+        if(pCam->GetType() == GeometricCamera::CAM_PINHOLE)
+        {
+            std::cout << " is pinhole" << std::endl;
+        }
+        else if(pCam->GetType() == GeometricCamera::CAM_FISHEYE)
+        {
+            std::cout << " is fisheye" << std::endl;
+        }
+        else
+        {
+            std::cout << " is unknown" << std::endl;
+        }
+    }
+
+#ifdef REGISTER_TIMES
+    vdRectStereo_ms.clear();
+    vdResizeImage_ms.clear();
+    vdORBExtract_ms.clear();
+    vdStereoMatch_ms.clear();
+    vdIMUInteg_ms.clear();
+    vdPosePred_ms.clear();
+    vdLMTrack_ms.clear();
+    vdNewKF_ms.clear();
+    vdTrackTotal_ms.clear();
+#endif
+}
+
+#ifdef REGISTER_TIMES
+double calcAverage(vector<double> v_times)
+{
+    double accum = 0;
+    for(double value : v_times)
+    {
+        accum += value;
+    }
+
+    return accum / v_times.size();
+}
+
+double calcDeviation(vector<double> v_times, double average)
+{
+    double accum = 0;
+    for(double value : v_times)
+    {
+        accum += pow(value - average, 2);
+    }
+    return sqrt(accum / v_times.size());
+}
+
+double calcAverage(vector<int> v_values)
+{
+    double accum = 0;
+    int total = 0;
+    for(double value : v_values)
+    {
+        if(value == 0)
+            continue;
+        accum += value;
+        total++;
+    }
+
+    return accum / total;
+}
+
+double calcDeviation(vector<int> v_values, double average)
+{
+    double accum = 0;
+    int total = 0;
+    for(double value : v_values)
+    {
+        if(value == 0)
+            continue;
+        accum += pow(value - average, 2);
+        total++;
+    }
+    return sqrt(accum / total);
+}
+
+void Tracking::LocalMapStats2File()
+{
+    ofstream f;
+    f.open("LocalMapTimeStats.txt");
+    f << fixed << setprecision(6);
+    f << "#Stereo rect[ms], MP culling[ms], MP creation[ms], LBA[ms], KF culling[ms], Total[ms]" << endl;
+    for(int i=0; i<mpLocalMapper->vdLMTotal_ms.size(); ++i)
+    {
+        f << mpLocalMapper->vdKFInsert_ms[i] << "," << mpLocalMapper->vdMPCulling_ms[i] << ","
+          << mpLocalMapper->vdMPCreation_ms[i] << "," << mpLocalMapper->vdLBASync_ms[i] << ","
+          << mpLocalMapper->vdKFCullingSync_ms[i] <<  "," << mpLocalMapper->vdLMTotal_ms[i] << endl;
+    }
+
+    f.close();
+
+    f.open("LBA_Stats.txt");
+    f << fixed << setprecision(6);
+    f << "#LBA time[ms], KF opt[#], KF fixed[#], MP[#], Edges[#]" << endl;
+    for(int i=0; i<mpLocalMapper->vdLBASync_ms.size(); ++i)
+    {
+        f << mpLocalMapper->vdLBASync_ms[i] << "," << mpLocalMapper->vnLBA_KFopt[i] << ","
+          << mpLocalMapper->vnLBA_KFfixed[i] << "," << mpLocalMapper->vnLBA_MPs[i] << ","
+          << mpLocalMapper->vnLBA_edges[i] << endl;
+    }
+
+
+    f.close();
+}
+
+void Tracking::TrackStats2File()
+{
+    ofstream f;
+    f.open("SessionInfo.txt");
+    f << fixed;
+    f << "Number of KFs: " << mpAtlas->GetAllKeyFrames().size() << endl;
+    f << "Number of MPs: " << mpAtlas->GetAllMapPoints().size() << endl;
+
+    f << "OpenCV version: " << CV_VERSION << endl;
+
+    f.close();
+
+    f.open("TrackingTimeStats.txt");
+    f << fixed << setprecision(6);
+
+    f << "#Image Rect[ms], Image Resize[ms], ORB ext[ms], Stereo match[ms], IMU preint[ms], Pose pred[ms], LM track[ms], KF dec[ms], Total[ms]" << endl;
+
+    for(int i=0; i<vdTrackTotal_ms.size(); ++i)
+    {
+        double stereo_rect = 0.0;
+        if(!vdRectStereo_ms.empty())
+        {
+            stereo_rect = vdRectStereo_ms[i];
+        }
+
+        double resize_image = 0.0;
+        if(!vdResizeImage_ms.empty())
+        {
+            resize_image = vdResizeImage_ms[i];
+        }
+
+        double stereo_match = 0.0;
+        if(!vdStereoMatch_ms.empty())
+        {
+            stereo_match = vdStereoMatch_ms[i];
+        }
+
+        double imu_preint = 0.0;
+        if(!vdIMUInteg_ms.empty())
+        {
+            imu_preint = vdIMUInteg_ms[i];
+        }
+
+        f << stereo_rect << "," << resize_image << "," << vdORBExtract_ms[i] << "," << stereo_match << "," << imu_preint << ","
+          << vdPosePred_ms[i] <<  "," << vdLMTrack_ms[i] << "," << vdNewKF_ms[i] << "," << vdTrackTotal_ms[i] << endl;
+    }
+
+    f.close();
+}
+
+void Tracking::PrintTimeStats()
+{
+    // Save data in files
+    TrackStats2File();
+    LocalMapStats2File();
+
+
+    ofstream f;
+    f.open("ExecMean.txt");
+    f << fixed;
+    //Report the mean and std of each one
+    std::cout << std::endl << " TIME STATS in ms (mean$\\pm$std)" << std::endl;
+    f << " TIME STATS in ms (mean$\\pm$std)" << std::endl;
+    cout << "OpenCV version: " << CV_VERSION << endl;
+    f << "OpenCV version: " << CV_VERSION << endl;
+    std::cout << "---------------------------" << std::endl;
+    std::cout << "Tracking" << std::setprecision(5) << std::endl << std::endl;
+    f << "---------------------------" << std::endl;
+    f << "Tracking" << std::setprecision(5) << std::endl << std::endl;
+    double average, deviation;
+    if(!vdRectStereo_ms.empty())
+    {
+        average = calcAverage(vdRectStereo_ms);
+        deviation = calcDeviation(vdRectStereo_ms, average);
+        std::cout << "Stereo Rectification: " << average << "$\\pm$" << deviation << std::endl;
+        f << "Stereo Rectification: " << average << "$\\pm$" << deviation << std::endl;
+    }
+
+    if(!vdResizeImage_ms.empty())
+    {
+        average = calcAverage(vdResizeImage_ms);
+        deviation = calcDeviation(vdResizeImage_ms, average);
+        std::cout << "Image Resize: " << average << "$\\pm$" << deviation << std::endl;
+        f << "Image Resize: " << average << "$\\pm$" << deviation << std::endl;
+    }
+
+    average = calcAverage(vdORBExtract_ms);
+    deviation = calcDeviation(vdORBExtract_ms, average);
+    std::cout << "ORB Extraction: " << average << "$\\pm$" << deviation << std::endl;
+    f << "ORB Extraction: " << average << "$\\pm$" << deviation << std::endl;
+
+    if(!vdStereoMatch_ms.empty())
+    {
+        average = calcAverage(vdStereoMatch_ms);
+        deviation = calcDeviation(vdStereoMatch_ms, average);
+        std::cout << "Stereo Matching: " << average << "$\\pm$" << deviation << std::endl;
+        f << "Stereo Matching: " << average << "$\\pm$" << deviation << std::endl;
+    }
+
+    if(!vdIMUInteg_ms.empty())
+    {
+        average = calcAverage(vdIMUInteg_ms);
+        deviation = calcDeviation(vdIMUInteg_ms, average);
+        std::cout << "IMU Preintegration: " << average << "$\\pm$" << deviation << std::endl;
+        f << "IMU Preintegration: " << average << "$\\pm$" << deviation << std::endl;
+    }
+
+    average = calcAverage(vdPosePred_ms);
+    deviation = calcDeviation(vdPosePred_ms, average);
+    std::cout << "Pose Prediction: " << average << "$\\pm$" << deviation << std::endl;
+    f << "Pose Prediction: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(vdLMTrack_ms);
+    deviation = calcDeviation(vdLMTrack_ms, average);
+    std::cout << "LM Track: " << average << "$\\pm$" << deviation << std::endl;
+    f << "LM Track: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(vdNewKF_ms);
+    deviation = calcDeviation(vdNewKF_ms, average);
+    std::cout << "New KF decision: " << average << "$\\pm$" << deviation << std::endl;
+    f << "New KF decision: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(vdTrackTotal_ms);
+    deviation = calcDeviation(vdTrackTotal_ms, average);
+    std::cout << "Total Tracking: " << average << "$\\pm$" << deviation << std::endl;
+    f << "Total Tracking: " << average << "$\\pm$" << deviation << std::endl;
+
+    // Local Mapping time stats
+    std::cout << std::endl << std::endl << std::endl;
+    std::cout << "Local Mapping" << std::endl << std::endl;
+    f << std::endl << "Local Mapping" << std::endl << std::endl;
+
+    average = calcAverage(mpLocalMapper->vdKFInsert_ms);
+    deviation = calcDeviation(mpLocalMapper->vdKFInsert_ms, average);
+    std::cout << "KF Insertion: " << average << "$\\pm$" << deviation << std::endl;
+    f << "KF Insertion: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(mpLocalMapper->vdMPCulling_ms);
+    deviation = calcDeviation(mpLocalMapper->vdMPCulling_ms, average);
+    std::cout << "MP Culling: " << average << "$\\pm$" << deviation << std::endl;
+    f << "MP Culling: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(mpLocalMapper->vdMPCreation_ms);
+    deviation = calcDeviation(mpLocalMapper->vdMPCreation_ms, average);
+    std::cout << "MP Creation: " << average << "$\\pm$" << deviation << std::endl;
+    f << "MP Creation: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(mpLocalMapper->vdLBA_ms);
+    deviation = calcDeviation(mpLocalMapper->vdLBA_ms, average);
+    std::cout << "LBA: " << average << "$\\pm$" << deviation << std::endl;
+    f << "LBA: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(mpLocalMapper->vdKFCulling_ms);
+    deviation = calcDeviation(mpLocalMapper->vdKFCulling_ms, average);
+    std::cout << "KF Culling: " << average << "$\\pm$" << deviation << std::endl;
+    f << "KF Culling: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(mpLocalMapper->vdLMTotal_ms);
+    deviation = calcDeviation(mpLocalMapper->vdLMTotal_ms, average);
+    std::cout << "Total Local Mapping: " << average << "$\\pm$" << deviation << std::endl;
+    f << "Total Local Mapping: " << average << "$\\pm$" << deviation << std::endl;
+
+    // Local Mapping LBA complexity
+    std::cout << "---------------------------" << std::endl;
+    std::cout << std::endl << "LBA complexity (mean$\\pm$std)" << std::endl;
+    f << "---------------------------" << std::endl;
+    f << std::endl << "LBA complexity (mean$\\pm$std)" << std::endl;
+
+    average = calcAverage(mpLocalMapper->vnLBA_edges);
+    deviation = calcDeviation(mpLocalMapper->vnLBA_edges, average);
+    std::cout << "LBA Edges: " << average << "$\\pm$" << deviation << std::endl;
+    f << "LBA Edges: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(mpLocalMapper->vnLBA_KFopt);
+    deviation = calcDeviation(mpLocalMapper->vnLBA_KFopt, average);
+    std::cout << "LBA KF optimized: " << average << "$\\pm$" << deviation << std::endl;
+    f << "LBA KF optimized: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(mpLocalMapper->vnLBA_KFfixed);
+    deviation = calcDeviation(mpLocalMapper->vnLBA_KFfixed, average);
+    std::cout << "LBA KF fixed: " << average << "$\\pm$" << deviation << std::endl;
+    f << "LBA KF fixed: " << average << "$\\pm$" << deviation << std::endl;
+
+    average = calcAverage(mpLocalMapper->vnLBA_MPs);
+    deviation = calcDeviation(mpLocalMapper->vnLBA_MPs, average);
+    std::cout << "LBA MP: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    f << "LBA MP: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+
+    std::cout << "LBA executions: " << mpLocalMapper->nLBA_exec << std::endl;
+    std::cout << "LBA aborts: " << mpLocalMapper->nLBA_abort << std::endl;
+    f << "LBA executions: " << mpLocalMapper->nLBA_exec << std::endl;
+    f << "LBA aborts: " << mpLocalMapper->nLBA_abort << std::endl;
+
+    // Map complexity
+    std::cout << "---------------------------" << std::endl;
+    std::cout << std::endl << "Map complexity" << std::endl;
+    std::cout << "KFs in map: " << mpAtlas->GetAllKeyFrames().size() << std::endl;
+    std::cout << "MPs in map: " << mpAtlas->GetAllMapPoints().size() << std::endl;
+    f << "---------------------------" << std::endl;
+    f << std::endl << "Map complexity" << std::endl;
+    vector<Map*> vpMaps = mpAtlas->GetAllMaps();
+    Map* pBestMap = vpMaps[0];
+    for(int i=1; i<vpMaps.size(); ++i)
+    {
+        if(pBestMap->GetAllKeyFrames().size() < vpMaps[i]->GetAllKeyFrames().size())
+        {
+            pBestMap = vpMaps[i];
+        }
+    }
+
+    f << "KFs in map: " << pBestMap->GetAllKeyFrames().size() << std::endl;
+    f << "MPs in map: " << pBestMap->GetAllMapPoints().size() << std::endl;
+
+    f << "---------------------------" << std::endl;
+    f << std::endl << "Place Recognition (mean$\\pm$std)" << std::endl;
+    std::cout << "---------------------------" << std::endl;
+    std::cout << std::endl << "Place Recognition (mean$\\pm$std)" << std::endl;
+    average = calcAverage(mpLoopClosing->vdDataQuery_ms);
+    deviation = calcDeviation(mpLoopClosing->vdDataQuery_ms, average);
+    f << "Database Query: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Database Query: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vdEstSim3_ms);
+    deviation = calcDeviation(mpLoopClosing->vdEstSim3_ms, average);
+    f << "SE3 estimation: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "SE3 estimation: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vdPRTotal_ms);
+    deviation = calcDeviation(mpLoopClosing->vdPRTotal_ms, average);
+    f << "Total Place Recognition: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    std::cout << "Total Place Recognition: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+
+    f << std::endl << "Loop Closing (mean$\\pm$std)" << std::endl;
+    std::cout << std::endl << "Loop Closing (mean$\\pm$std)" << std::endl;
+    average = calcAverage(mpLoopClosing->vdLoopFusion_ms);
+    deviation = calcDeviation(mpLoopClosing->vdLoopFusion_ms, average);
+    f << "Loop Fusion: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Loop Fusion: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vdLoopOptEss_ms);
+    deviation = calcDeviation(mpLoopClosing->vdLoopOptEss_ms, average);
+    f << "Essential Graph: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Essential Graph: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vdLoopTotal_ms);
+    deviation = calcDeviation(mpLoopClosing->vdLoopTotal_ms, average);
+    f << "Total Loop Closing: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    std::cout << "Total Loop Closing: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+
+    f << "Numb exec: " << mpLoopClosing->nLoop << std::endl;
+    std::cout << "Num exec: " << mpLoopClosing->nLoop << std::endl;
+    average = calcAverage(mpLoopClosing->vnLoopKFs);
+    deviation = calcDeviation(mpLoopClosing->vnLoopKFs, average);
+    f << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+
+    f << std::endl << "Map Merging (mean$\\pm$std)" << std::endl;
+    std::cout << std::endl << "Map Merging (mean$\\pm$std)" << std::endl;
+    average = calcAverage(mpLoopClosing->vdMergeMaps_ms);
+    deviation = calcDeviation(mpLoopClosing->vdMergeMaps_ms, average);
+    f << "Merge Maps: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Merge Maps: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vdWeldingBA_ms);
+    deviation = calcDeviation(mpLoopClosing->vdWeldingBA_ms, average);
+    f << "Welding BA: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Welding BA: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vdMergeOptEss_ms);
+    deviation = calcDeviation(mpLoopClosing->vdMergeOptEss_ms, average);
+    f << "Optimization Ess.: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Optimization Ess.: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vdMergeTotal_ms);
+    deviation = calcDeviation(mpLoopClosing->vdMergeTotal_ms, average);
+    f << "Total Map Merging: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    std::cout << "Total Map Merging: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+
+    f << "Numb exec: " << mpLoopClosing->nMerges << std::endl;
+    std::cout << "Num exec: " << mpLoopClosing->nMerges << std::endl;
+    average = calcAverage(mpLoopClosing->vnMergeKFs);
+    deviation = calcDeviation(mpLoopClosing->vnMergeKFs, average);
+    f << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vnMergeMPs);
+    deviation = calcDeviation(mpLoopClosing->vnMergeMPs, average);
+    f << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
+
+    f << std::endl << "Full GBA (mean$\\pm$std)" << std::endl;
+    std::cout << std::endl << "Full GBA (mean$\\pm$std)" << std::endl;
+    average = calcAverage(mpLoopClosing->vdGBA_ms);
+    deviation = calcDeviation(mpLoopClosing->vdGBA_ms, average);
+    f << "GBA: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "GBA: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vdUpdateMap_ms);
+    deviation = calcDeviation(mpLoopClosing->vdUpdateMap_ms, average);
+    f << "Map Update: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Map Update: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vdFGBATotal_ms);
+    deviation = calcDeviation(mpLoopClosing->vdFGBATotal_ms, average);
+    f << "Total Full GBA: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+    std::cout << "Total Full GBA: " << average << "$\\pm$" << deviation << std::endl << std::endl;
+
+    f << "Numb exec: " << mpLoopClosing->nFGBA_exec << std::endl;
+    std::cout << "Num exec: " << mpLoopClosing->nFGBA_exec << std::endl;
+    f << "Numb abort: " << mpLoopClosing->nFGBA_abort << std::endl;
+    std::cout << "Num abort: " << mpLoopClosing->nFGBA_abort << std::endl;
+    average = calcAverage(mpLoopClosing->vnGBAKFs);
+    deviation = calcDeviation(mpLoopClosing->vnGBAKFs, average);
+    f << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Number of KFs: " << average << "$\\pm$" << deviation << std::endl;
+    average = calcAverage(mpLoopClosing->vnGBAMPs);
+    deviation = calcDeviation(mpLoopClosing->vnGBAMPs, average);
+    f << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
+    std::cout << "Number of MPs: " << average << "$\\pm$" << deviation << std::endl;
+
+    f.close();
+
+}
+
+#endif
+
+Tracking::~Tracking()
+{
+    //f_track_stats.close();
+
+}
+
+void Tracking::newParameterLoader(Settings *settings) {
+    mpCamera = settings->camera1();
+    mpCamera = mpAtlas->AddCamera(mpCamera);
+
+    if(settings->needToUndistort()){
+        mDistCoef = settings->camera1DistortionCoef();
+    }
+    else{
+        mDistCoef = cv::Mat::zeros(4,1,CV_32F);
+    }
+
+    //TODO: missing image scaling and rectification
+    mImageScale = 1.0f;
+
+    mK = cv::Mat::eye(3,3,CV_32F);
+    mK.at<float>(0,0) = mpCamera->getParameter(0);
+    mK.at<float>(1,1) = mpCamera->getParameter(1);
+    mK.at<float>(0,2) = mpCamera->getParameter(2);
+    mK.at<float>(1,2) = mpCamera->getParameter(3);
+
+    mK_.setIdentity();
+    mK_(0,0) = mpCamera->getParameter(0);
+    mK_(1,1) = mpCamera->getParameter(1);
+    mK_(0,2) = mpCamera->getParameter(2);
+    mK_(1,2) = mpCamera->getParameter(3);
+
+    if((mSensor==System::STEREO || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD) &&
+        settings->cameraType() == Settings::KannalaBrandt){
+        mpCamera2 = settings->camera2();
+        mpCamera2 = mpAtlas->AddCamera(mpCamera2);
+
+        mTlr = settings->Tlr();
+
+        mpFrameDrawer->both = true;
+    }
+
+    if(mSensor==System::STEREO || mSensor==System::RGBD || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD ){
+        mbf = settings->bf();
+        mThDepth = settings->b() * settings->thDepth();
+    }
+
+    if(mSensor==System::RGBD || mSensor==System::IMU_RGBD){
+        mDepthMapFactor = settings->depthMapFactor();
+        if(fabs(mDepthMapFactor)<1e-5)
+            mDepthMapFactor=1;
+        else
+            mDepthMapFactor = 1.0f/mDepthMapFactor;
+    }
+
+    mMinFrames = 0;
+    mMaxFrames = settings->fps();
+    mbRGB = settings->rgb();
+
+    //ORB parameters
+    int nFeatures = settings->nFeatures();
+    int nLevels = settings->nLevels();
+    int fIniThFAST = settings->initThFAST();
+    int fMinThFAST = settings->minThFAST();
+    float fScaleFactor = settings->scaleFactor();
+
+    mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+
+    if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
+        mpORBextractorRight = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+
+    if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
+        mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+
+    //IMU parameters
+    Sophus::SE3f Tbc = settings->Tbc();
+    mInsertKFsLost = settings->insertKFsWhenLost();
+    mImuFreq = settings->imuFrequency();
+    mImuPer = 0.001; //1.0 / (double) mImuFreq;     //TODO: ESTO ESTA BIEN?
+    float Ng = settings->noiseGyro();
+    float Na = settings->noiseAcc();
+    float Ngw = settings->gyroWalk();
+    float Naw = settings->accWalk();
+
+    const float sf = sqrt(mImuFreq);
+    mpImuCalib = new IMU::Calib(Tbc,Ng*sf,Na*sf,Ngw/sf,Naw/sf);
+
+    mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
+}
+
+bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
+{
+    mDistCoef = cv::Mat::zeros(4,1,CV_32F);
+    cout << endl << "Camera Parameters: " << endl;
+    bool b_miss_params = false;
+
+    string sCameraName = fSettings["Camera.type"];
+    if(sCameraName == "PinHole")
+    {
+        float fx, fy, cx, cy;
+        mImageScale = 1.f;
+
+        // Camera calibration parameters
+        cv::FileNode node = fSettings["Camera.fx"];
+        if(!node.empty() && node.isReal())
+        {
+            fx = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.fx parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.fy"];
+        if(!node.empty() && node.isReal())
+        {
+            fy = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.fy parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.cx"];
+        if(!node.empty() && node.isReal())
+        {
+            cx = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.cx parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.cy"];
+        if(!node.empty() && node.isReal())
+        {
+            cy = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.cy parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        // Distortion parameters
+        node = fSettings["Camera.k1"];
+        if(!node.empty() && node.isReal())
+        {
+            mDistCoef.at<float>(0) = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.k1 parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.k2"];
+        if(!node.empty() && node.isReal())
+        {
+            mDistCoef.at<float>(1) = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.k2 parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.p1"];
+        if(!node.empty() && node.isReal())
+        {
+            mDistCoef.at<float>(2) = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.p1 parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.p2"];
+        if(!node.empty() && node.isReal())
+        {
+            mDistCoef.at<float>(3) = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.p2 parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.k3"];
+        if(!node.empty() && node.isReal())
+        {
+            mDistCoef.resize(5);
+            mDistCoef.at<float>(4) = node.real();
+        }
+
+        node = fSettings["Camera.imageScale"];
+        if(!node.empty() && node.isReal())
+        {
+            mImageScale = node.real();
+        }
+
+        if(b_miss_params)
+        {
+            return false;
+        }
+
+        if(mImageScale != 1.f)
+        {
+            // K matrix parameters must be scaled.
+            fx = fx * mImageScale;
+            fy = fy * mImageScale;
+            cx = cx * mImageScale;
+            cy = cy * mImageScale;
+        }
+
+        vector<float> vCamCalib{fx,fy,cx,cy};
+
+        mpCamera = new Pinhole(vCamCalib);
+
+        mpCamera = mpAtlas->AddCamera(mpCamera);
+
+        std::cout << "- Camera: Pinhole" << std::endl;
+        std::cout << "- Image scale: " << mImageScale << std::endl;
+        std::cout << "- fx: " << fx << std::endl;
+        std::cout << "- fy: " << fy << std::endl;
+        std::cout << "- cx: " << cx << std::endl;
+        std::cout << "- cy: " << cy << std::endl;
+        std::cout << "- k1: " << mDistCoef.at<float>(0) << std::endl;
+        std::cout << "- k2: " << mDistCoef.at<float>(1) << std::endl;
+
+
+        std::cout << "- p1: " << mDistCoef.at<float>(2) << std::endl;
+        std::cout << "- p2: " << mDistCoef.at<float>(3) << std::endl;
+
+        if(mDistCoef.rows==5)
+            std::cout << "- k3: " << mDistCoef.at<float>(4) << std::endl;
+
+        mK = cv::Mat::eye(3,3,CV_32F);
+        mK.at<float>(0,0) = fx;
+        mK.at<float>(1,1) = fy;
+        mK.at<float>(0,2) = cx;
+        mK.at<float>(1,2) = cy;
+
+        mK_.setIdentity();
+        mK_(0,0) = fx;
+        mK_(1,1) = fy;
+        mK_(0,2) = cx;
+        mK_(1,2) = cy;
+    }
+    else if(sCameraName == "KannalaBrandt8")
+    {
+        float fx, fy, cx, cy;
+        float k1, k2, k3, k4;
+        mImageScale = 1.f;
+
+        // Camera calibration parameters
+        cv::FileNode node = fSettings["Camera.fx"];
+        if(!node.empty() && node.isReal())
+        {
+            fx = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.fx parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+        node = fSettings["Camera.fy"];
+        if(!node.empty() && node.isReal())
+        {
+            fy = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.fy parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.cx"];
+        if(!node.empty() && node.isReal())
+        {
+            cx = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.cx parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.cy"];
+        if(!node.empty() && node.isReal())
+        {
+            cy = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.cy parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        // Distortion parameters
+        node = fSettings["Camera.k1"];
+        if(!node.empty() && node.isReal())
+        {
+            k1 = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.k1 parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+        node = fSettings["Camera.k2"];
+        if(!node.empty() && node.isReal())
+        {
+            k2 = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.k2 parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.k3"];
+        if(!node.empty() && node.isReal())
+        {
+            k3 = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.k3 parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.k4"];
+        if(!node.empty() && node.isReal())
+        {
+            k4 = node.real();
+        }
+        else
+        {
+            std::cerr << "*Camera.k4 parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+        node = fSettings["Camera.imageScale"];
+        if(!node.empty() && node.isReal())
+        {
+            mImageScale = node.real();
+        }
+
+        if(!b_miss_params)
+        {
+            if(mImageScale != 1.f)
+            {
+                // K matrix parameters must be scaled.
+                fx = fx * mImageScale;
+                fy = fy * mImageScale;
+                cx = cx * mImageScale;
+                cy = cy * mImageScale;
+            }
+
+            vector<float> vCamCalib{fx,fy,cx,cy,k1,k2,k3,k4};
+            mpCamera = new KannalaBrandt8(vCamCalib);
+            mpCamera = mpAtlas->AddCamera(mpCamera);
+            std::cout << "- Camera: Fisheye" << std::endl;
+            std::cout << "- Image scale: " << mImageScale << std::endl;
+            std::cout << "- fx: " << fx << std::endl;
+            std::cout << "- fy: " << fy << std::endl;
+            std::cout << "- cx: " << cx << std::endl;
+            std::cout << "- cy: " << cy << std::endl;
+            std::cout << "- k1: " << k1 << std::endl;
+            std::cout << "- k2: " << k2 << std::endl;
+            std::cout << "- k3: " << k3 << std::endl;
+            std::cout << "- k4: " << k4 << std::endl;
+
+            mK = cv::Mat::eye(3,3,CV_32F);
+            mK.at<float>(0,0) = fx;
+            mK.at<float>(1,1) = fy;
+            mK.at<float>(0,2) = cx;
+            mK.at<float>(1,2) = cy;
+
+            mK_.setIdentity();
+            mK_(0,0) = fx;
+            mK_(1,1) = fy;
+            mK_(0,2) = cx;
+            mK_(1,2) = cy;
+        }
+
+        if(mSensor==System::STEREO || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD){
+            // Right camera
+            // Camera calibration parameters
+            cv::FileNode node = fSettings["Camera2.fx"];
+            if(!node.empty() && node.isReal())
+            {
+                fx = node.real();
+            }
+            else
+            {
+                std::cerr << "*Camera2.fx parameter doesn't exist or is not a real number*" << std::endl;
+                b_miss_params = true;
+            }
+            node = fSettings["Camera2.fy"];
+            if(!node.empty() && node.isReal())
+            {
+                fy = node.real();
+            }
+            else
+            {
+                std::cerr << "*Camera2.fy parameter doesn't exist or is not a real number*" << std::endl;
+                b_miss_params = true;
+            }
+
+            node = fSettings["Camera2.cx"];
+            if(!node.empty() && node.isReal())
+            {
+                cx = node.real();
+            }
+            else
+            {
+                std::cerr << "*Camera2.cx parameter doesn't exist or is not a real number*" << std::endl;
+                b_miss_params = true;
+            }
+
+            node = fSettings["Camera2.cy"];
+            if(!node.empty() && node.isReal())
+            {
+                cy = node.real();
+            }
+            else
+            {
+                std::cerr << "*Camera2.cy parameter doesn't exist or is not a real number*" << std::endl;
+                b_miss_params = true;
+            }
+
+            // Distortion parameters
+            node = fSettings["Camera2.k1"];
+            if(!node.empty() && node.isReal())
+            {
+                k1 = node.real();
+            }
+            else
+            {
+                std::cerr << "*Camera2.k1 parameter doesn't exist or is not a real number*" << std::endl;
+                b_miss_params = true;
+            }
+            node = fSettings["Camera2.k2"];
+            if(!node.empty() && node.isReal())
+            {
+                k2 = node.real();
+            }
+            else
+            {
+                std::cerr << "*Camera2.k2 parameter doesn't exist or is not a real number*" << std::endl;
+                b_miss_params = true;
+            }
+
+            node = fSettings["Camera2.k3"];
+            if(!node.empty() && node.isReal())
+            {
+                k3 = node.real();
+            }
+            else
+            {
+                std::cerr << "*Camera2.k3 parameter doesn't exist or is not a real number*" << std::endl;
+                b_miss_params = true;
+            }
+
+            node = fSettings["Camera2.k4"];
+            if(!node.empty() && node.isReal())
+            {
+                k4 = node.real();
+            }
+            else
+            {
+                std::cerr << "*Camera2.k4 parameter doesn't exist or is not a real number*" << std::endl;
+                b_miss_params = true;
+            }
+
+
+            int leftLappingBegin = -1;
+            int leftLappingEnd = -1;
+
+            int rightLappingBegin = -1;
+            int rightLappingEnd = -1;
+
+            node = fSettings["Camera.lappingBegin"];
+            if(!node.empty() && node.isInt())
+            {
+                leftLappingBegin = node.operator int();
+            }
+            else
+            {
+                std::cout << "WARNING: Camera.lappingBegin not correctly defined" << std::endl;
+            }
+            node = fSettings["Camera.lappingEnd"];
+            if(!node.empty() && node.isInt())
+            {
+                leftLappingEnd = node.operator int();
+            }
+            else
+            {
+                std::cout << "WARNING: Camera.lappingEnd not correctly defined" << std::endl;
+            }
+            node = fSettings["Camera2.lappingBegin"];
+            if(!node.empty() && node.isInt())
+            {
+                rightLappingBegin = node.operator int();
+            }
+            else
+            {
+                std::cout << "WARNING: Camera2.lappingBegin not correctly defined" << std::endl;
+            }
+            node = fSettings["Camera2.lappingEnd"];
+            if(!node.empty() && node.isInt())
+            {
+                rightLappingEnd = node.operator int();
+            }
+            else
+            {
+                std::cout << "WARNING: Camera2.lappingEnd not correctly defined" << std::endl;
+            }
+
+            node = fSettings["Tlr"];
+            cv::Mat cvTlr;
+            if(!node.empty())
+            {
+                cvTlr = node.mat();
+                if(cvTlr.rows != 3 || cvTlr.cols != 4)
+                {
+                    std::cerr << "*Tlr matrix have to be a 3x4 transformation matrix*" << std::endl;
+                    b_miss_params = true;
+                }
+            }
+            else
+            {
+                std::cerr << "*Tlr matrix doesn't exist*" << std::endl;
+                b_miss_params = true;
+            }
+
+            if(!b_miss_params)
+            {
+                if(mImageScale != 1.f)
+                {
+                    // K matrix parameters must be scaled.
+                    fx = fx * mImageScale;
+                    fy = fy * mImageScale;
+                    cx = cx * mImageScale;
+                    cy = cy * mImageScale;
+
+                    leftLappingBegin = leftLappingBegin * mImageScale;
+                    leftLappingEnd = leftLappingEnd * mImageScale;
+                    rightLappingBegin = rightLappingBegin * mImageScale;
+                    rightLappingEnd = rightLappingEnd * mImageScale;
+                }
+
+                static_cast<KannalaBrandt8*>(mpCamera)->mvLappingArea[0] = leftLappingBegin;
+                static_cast<KannalaBrandt8*>(mpCamera)->mvLappingArea[1] = leftLappingEnd;
+
+                mpFrameDrawer->both = true;
+
+                vector<float> vCamCalib2{fx,fy,cx,cy,k1,k2,k3,k4};
+                mpCamera2 = new KannalaBrandt8(vCamCalib2);
+                mpCamera2 = mpAtlas->AddCamera(mpCamera2);
+
+                mTlr = Converter::toSophus(cvTlr);
+
+                static_cast<KannalaBrandt8*>(mpCamera2)->mvLappingArea[0] = rightLappingBegin;
+                static_cast<KannalaBrandt8*>(mpCamera2)->mvLappingArea[1] = rightLappingEnd;
+
+                std::cout << "- Camera1 Lapping: " << leftLappingBegin << ", " << leftLappingEnd << std::endl;
+
+                std::cout << std::endl << "Camera2 Parameters:" << std::endl;
+                std::cout << "- Camera: Fisheye" << std::endl;
+                std::cout << "- Image scale: " << mImageScale << std::endl;
+                std::cout << "- fx: " << fx << std::endl;
+                std::cout << "- fy: " << fy << std::endl;
+                std::cout << "- cx: " << cx << std::endl;
+                std::cout << "- cy: " << cy << std::endl;
+                std::cout << "- k1: " << k1 << std::endl;
+                std::cout << "- k2: " << k2 << std::endl;
+                std::cout << "- k3: " << k3 << std::endl;
+                std::cout << "- k4: " << k4 << std::endl;
+
+                std::cout << "- mTlr: \n" << cvTlr << std::endl;
+
+                std::cout << "- Camera2 Lapping: " << rightLappingBegin << ", " << rightLappingEnd << std::endl;
+            }
+        }
+
+        if(b_miss_params)
+        {
+            return false;
+        }
+
+    }
+    else
+    {
+        std::cerr << "*Not Supported Camera Sensor*" << std::endl;
+        std::cerr << "Check an example configuration file with the desired sensor" << std::endl;
+    }
+
+    if(mSensor==System::STEREO || mSensor==System::RGBD || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD )
+    {
+        cv::FileNode node = fSettings["Camera.bf"];
+        if(!node.empty() && node.isReal())
+        {
+            mbf = node.real();
+            if(mImageScale != 1.f)
+            {
+                mbf *= mImageScale;
+            }
+        }
+        else
+        {
+            std::cerr << "*Camera.bf parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+    }
 
     float fps = fSettings["Camera.fps"];
     if(fps==0)
@@ -153,17 +1157,6 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mMinFrames = 0;
     mMaxFrames = fps;
 
-    cout << endl << "Camera Parameters: " << endl;
-    cout << "- fx: " << fx << endl;
-    cout << "- fy: " << fy << endl;
-    cout << "- cx: " << cx << endl;
-    cout << "- cy: " << cy << endl;
-    cout << "- k1: " << DistCoef.at<float>(0) << endl;
-    cout << "- k2: " << DistCoef.at<float>(1) << endl;
-    if(DistCoef.rows==5)
-        cout << "- k3: " << DistCoef.at<float>(4) << endl;
-    cout << "- p1: " << DistCoef.at<float>(2) << endl;
-    cout << "- p2: " << DistCoef.at<float>(3) << endl;
     cout << "- fps: " << fps << endl;
 
 
@@ -175,56 +1168,266 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     else
         cout << "- color order: BGR (ignored if grayscale)" << endl;
 
-    // Load ORB parameters
+    if(mSensor==System::STEREO || mSensor==System::RGBD || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD)
+    {
+        float fx = mpCamera->getParameter(0);
+        cv::FileNode node = fSettings["ThDepth"];
+        if(!node.empty()  && node.isReal())
+        {
+            mThDepth = node.real();
+            mThDepth = mbf*mThDepth/fx;
+            cout << endl << "Depth Threshold (Close/Far Points): " << mThDepth << endl;
+        }
+        else
+        {
+            std::cerr << "*ThDepth parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
 
-    int nFeatures = fSettings["ORBextractor.nFeatures"];
-    float fScaleFactor = fSettings["ORBextractor.scaleFactor"];
-    int nLevels = fSettings["ORBextractor.nLevels"];
-    int fIniThFAST = fSettings["ORBextractor.iniThFAST"];
-    int fMinThFAST = fSettings["ORBextractor.minThFAST"];
+
+    }
+
+    if(mSensor==System::RGBD || mSensor==System::IMU_RGBD)
+    {
+        cv::FileNode node = fSettings["DepthMapFactor"];
+        if(!node.empty() && node.isReal())
+        {
+            mDepthMapFactor = node.real();
+            if(fabs(mDepthMapFactor)<1e-5)
+                mDepthMapFactor=1;
+            else
+                mDepthMapFactor = 1.0f/mDepthMapFactor;
+        }
+        else
+        {
+            std::cerr << "*DepthMapFactor parameter doesn't exist or is not a real number*" << std::endl;
+            b_miss_params = true;
+        }
+
+    }
+
+    if(b_miss_params)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool Tracking::ParseORBParamFile(cv::FileStorage &fSettings)
+{
+    bool b_miss_params = false;
+    int nFeatures, nLevels, fIniThFAST, fMinThFAST;
+    float fScaleFactor;
+
+    cv::FileNode node = fSettings["ORBextractor.nFeatures"];
+    if(!node.empty() && node.isInt())
+    {
+        nFeatures = node.operator int();
+    }
+    else
+    {
+        std::cerr << "*ORBextractor.nFeatures parameter doesn't exist or is not an integer*" << std::endl;
+        b_miss_params = true;
+    }
+
+    node = fSettings["ORBextractor.scaleFactor"];
+    if(!node.empty() && node.isReal())
+    {
+        fScaleFactor = node.real();
+    }
+    else
+    {
+        std::cerr << "*ORBextractor.scaleFactor parameter doesn't exist or is not a real number*" << std::endl;
+        b_miss_params = true;
+    }
+
+    node = fSettings["ORBextractor.nLevels"];
+    if(!node.empty() && node.isInt())
+    {
+        nLevels = node.operator int();
+    }
+    else
+    {
+        std::cerr << "*ORBextractor.nLevels parameter doesn't exist or is not an integer*" << std::endl;
+        b_miss_params = true;
+    }
+
+    node = fSettings["ORBextractor.iniThFAST"];
+    if(!node.empty() && node.isInt())
+    {
+        fIniThFAST = node.operator int();
+    }
+    else
+    {
+        std::cerr << "*ORBextractor.iniThFAST parameter doesn't exist or is not an integer*" << std::endl;
+        b_miss_params = true;
+    }
+
+    node = fSettings["ORBextractor.minThFAST"];
+    if(!node.empty() && node.isInt())
+    {
+        fMinThFAST = node.operator int();
+    }
+    else
+    {
+        std::cerr << "*ORBextractor.minThFAST parameter doesn't exist or is not an integer*" << std::endl;
+        b_miss_params = true;
+    }
+
+    if(b_miss_params)
+    {
+        return false;
+    }
 
     mpORBextractorLeft = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
-    if(sensor==System::STEREO)
+    if(mSensor==System::STEREO || mSensor==System::IMU_STEREO)
         mpORBextractorRight = new ORBextractor(nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
-    if(sensor==System::MONOCULAR)
-        mpIniORBextractor = new ORBextractor(2*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
+    if(mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR)
+        mpIniORBextractor = new ORBextractor(5*nFeatures,fScaleFactor,nLevels,fIniThFAST,fMinThFAST);
 
-    cout << endl  << "ORB Extractor Parameters: " << endl;
+    cout << endl << "ORB Extractor Parameters: " << endl;
     cout << "- Number of Features: " << nFeatures << endl;
     cout << "- Scale Levels: " << nLevels << endl;
     cout << "- Scale Factor: " << fScaleFactor << endl;
     cout << "- Initial Fast Threshold: " << fIniThFAST << endl;
     cout << "- Minimum Fast Threshold: " << fMinThFAST << endl;
 
-    if(sensor==System::STEREO || sensor==System::RGBD)
+    return true;
+}
+
+bool Tracking::ParseIMUParamFile(cv::FileStorage &fSettings)
+{
+    bool b_miss_params = false;
+
+    cv::Mat cvTbc;
+    cv::FileNode node = fSettings["Tbc"];
+    if(!node.empty())
     {
-        mThDepth = mbf*(float)fSettings["ThDepth"]/fx;
-        cout << endl << "Depth Threshold (Close/Far Points): " << mThDepth << endl;
+        cvTbc = node.mat();
+        if(cvTbc.rows != 4 || cvTbc.cols != 4)
+        {
+            std::cerr << "*Tbc matrix have to be a 4x4 transformation matrix*" << std::endl;
+            b_miss_params = true;
+        }
+    }
+    else
+    {
+        std::cerr << "*Tbc matrix doesn't exist*" << std::endl;
+        b_miss_params = true;
+    }
+    cout << endl;
+    cout << "Left camera to Imu Transform (Tbc): " << endl << cvTbc << endl;
+    Eigen::Matrix<float,4,4,Eigen::RowMajor> eigTbc(cvTbc.ptr<float>(0));
+    Sophus::SE3f Tbc(eigTbc);
+
+    node = fSettings["InsertKFsWhenLost"];
+    mInsertKFsLost = true;
+    if(!node.empty() && node.isInt())
+    {
+        mInsertKFsLost = (bool) node.operator int();
     }
 
-    if(sensor==System::RGBD)
+    if(!mInsertKFsLost)
+        cout << "Do not insert keyframes when lost visual tracking " << endl;
+
+
+
+    float Ng, Na, Ngw, Naw;
+
+    node = fSettings["IMU.Frequency"];
+    if(!node.empty() && node.isInt())
     {
-        mDepthMapFactor = fSettings["DepthMapFactor"];
-        if(fabs(mDepthMapFactor)<1e-5)
-            mDepthMapFactor=1;
-        else
-            mDepthMapFactor = 1.0f/mDepthMapFactor;
+        mImuFreq = node.operator int();
+        mImuPer = 0.001; //1.0 / (double) mImuFreq;
+    }
+    else
+    {
+        std::cerr << "*IMU.Frequency parameter doesn't exist or is not an integer*" << std::endl;
+        b_miss_params = true;
     }
 
+    node = fSettings["IMU.NoiseGyro"];
+    if(!node.empty() && node.isReal())
+    {
+        Ng = node.real();
+    }
+    else
+    {
+        std::cerr << "*IMU.NoiseGyro parameter doesn't exist or is not a real number*" << std::endl;
+        b_miss_params = true;
+    }
+
+    node = fSettings["IMU.NoiseAcc"];
+    if(!node.empty() && node.isReal())
+    {
+        Na = node.real();
+    }
+    else
+    {
+        std::cerr << "*IMU.NoiseAcc parameter doesn't exist or is not a real number*" << std::endl;
+        b_miss_params = true;
+    }
+
+    node = fSettings["IMU.GyroWalk"];
+    if(!node.empty() && node.isReal())
+    {
+        Ngw = node.real();
+    }
+    else
+    {
+        std::cerr << "*IMU.GyroWalk parameter doesn't exist or is not a real number*" << std::endl;
+        b_miss_params = true;
+    }
+
+    node = fSettings["IMU.AccWalk"];
+    if(!node.empty() && node.isReal())
+    {
+        Naw = node.real();
+    }
+    else
+    {
+        std::cerr << "*IMU.AccWalk parameter doesn't exist or is not a real number*" << std::endl;
+        b_miss_params = true;
+    }
+
+    node = fSettings["IMU.fastInit"];
+    mFastInit = false;
+    if(!node.empty())
+    {
+        mFastInit = static_cast<int>(fSettings["IMU.fastInit"]) != 0;
+    }
+
+    if(mFastInit)
+        cout << "Fast IMU initialization. Acceleration is not checked \n";
+
+    if(b_miss_params)
+    {
+        return false;
+    }
+
+    const float sf = sqrt(mImuFreq);
+    cout << endl;
+    cout << "IMU frequency: " << mImuFreq << " Hz" << endl;
+    cout << "IMU gyro noise: " << Ng << " rad/s/sqrt(Hz)" << endl;
+    cout << "IMU gyro walk: " << Ngw << " rad/s^2/sqrt(Hz)" << endl;
+    cout << "IMU accelerometer noise: " << Na << " m/s^2/sqrt(Hz)" << endl;
+    cout << "IMU accelerometer walk: " << Naw << " m/s^3/sqrt(Hz)" << endl;
+
+    mpImuCalib = new IMU::Calib(Tbc,Ng*sf,Na*sf,Ngw/sf,Naw/sf);
+
+    mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
+
+
+    return true;
 }
 
 void Tracking::SetLocalMapper(LocalMapping *pLocalMapper)
 {
     mpLocalMapper=pLocalMapper;
 }
-
-void Tracking::SetLocalObjectMapper(LocalObjectMapping *obj_mapper)
-{
-    local_object_mapper_ = obj_mapper;
-}
-
 
 void Tracking::SetLoopClosing(LoopClosing *pLoopClosing)
 {
@@ -236,840 +1439,426 @@ void Tracking::SetViewer(Viewer *pViewer)
     mpViewer=pViewer;
 }
 
-void Tracking::SetARViewer(ARViewer *pARViewer)
+void Tracking::SetStepByStep(bool bSet)
 {
-    mpARViewer = pARViewer;
+    bStepByStep = bSet;
+}
+
+bool Tracking::GetStepByStep()
+{
+    return bStepByStep;
 }
 
 
-cv::Mat Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat &imRectRight, const double &timestamp)
+
+Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat &imRectRight, const double &timestamp, string filename)
 {
+    //cout << "GrabImageStereo" << endl;
+
     mImGray = imRectLeft;
     cv::Mat imGrayRight = imRectRight;
+    mImRight = imRectRight;
 
     if(mImGray.channels()==3)
     {
+        //cout << "Image with 3 channels" << endl;
         if(mbRGB)
         {
-            cvtColor(mImGray,mImGray,CV_RGB2GRAY);
-            cvtColor(imGrayRight,imGrayRight,CV_RGB2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_RGB2GRAY);
+            cvtColor(imGrayRight,imGrayRight,cv::COLOR_RGB2GRAY);
         }
         else
         {
-            cvtColor(mImGray,mImGray,CV_BGR2GRAY);
-            cvtColor(imGrayRight,imGrayRight,CV_BGR2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_BGR2GRAY);
+            cvtColor(imGrayRight,imGrayRight,cv::COLOR_BGR2GRAY);
         }
     }
     else if(mImGray.channels()==4)
     {
+        //cout << "Image with 4 channels" << endl;
         if(mbRGB)
         {
-            cvtColor(mImGray,mImGray,CV_RGBA2GRAY);
-            cvtColor(imGrayRight,imGrayRight,CV_RGBA2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_RGBA2GRAY);
+            cvtColor(imGrayRight,imGrayRight,cv::COLOR_RGBA2GRAY);
         }
         else
         {
-            cvtColor(mImGray,mImGray,CV_BGRA2GRAY);
-            cvtColor(imGrayRight,imGrayRight,CV_BGRA2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
+            cvtColor(imGrayRight,imGrayRight,cv::COLOR_BGRA2GRAY);
         }
     }
 
-    mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth);
+    //cout << "Incoming frame creation" << endl;
 
+    if (mSensor == System::STEREO && !mpCamera2)
+        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
+    else if(mSensor == System::STEREO && mpCamera2)
+        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,mpCamera2,mTlr);
+    else if(mSensor == System::IMU_STEREO && !mpCamera2)
+        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
+    else if(mSensor == System::IMU_STEREO && mpCamera2)
+        mCurrentFrame = Frame(mImGray,imGrayRight,timestamp,mpORBextractorLeft,mpORBextractorRight,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,mpCamera2,mTlr,&mLastFrame,*mpImuCalib);
+
+    //cout << "Incoming frame ended" << endl;
+
+    mCurrentFrame.mNameFile = filename;
+    mCurrentFrame.mnDataset = mnNumDataset;
+
+#ifdef REGISTER_TIMES
+    vdORBExtract_ms.push_back(mCurrentFrame.mTimeORB_Ext);
+    vdStereoMatch_ms.push_back(mCurrentFrame.mTimeStereoMatch);
+#endif
+
+    //cout << "Tracking start" << endl;
     Track();
+    //cout << "Tracking end" << endl;
 
-    return mCurrentFrame.mTcw.clone();
+    return mCurrentFrame.GetPose();
 }
 
 
-cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, const std::vector<Detection::Ptr>& detections, bool force_relocalize)
+Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, string filename)
 {
-    current_frame_idx_ = (current_frame_idx_ + 1) % (std::numeric_limits<size_t>::max()-1);
     mImGray = imRGB;
     cv::Mat imDepth = imD;
-    imRGB.copyTo(im_rgb_);
 
     if(mImGray.channels()==3)
     {
         if(mbRGB)
-            cvtColor(mImGray,mImGray,CV_RGB2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_RGB2GRAY);
         else
-            cvtColor(mImGray,mImGray,CV_BGR2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_BGR2GRAY);
     }
     else if(mImGray.channels()==4)
     {
         if(mbRGB)
-            cvtColor(mImGray,mImGray,CV_RGBA2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_RGBA2GRAY);
         else
-            cvtColor(mImGray,mImGray,CV_BGRA2GRAY);
-    }
-
-    // [MOVED UP] Process detections first to create mask for Frame
-    current_frame_detections_ = detections;
-    current_frame_good_detections_.clear(); // Đây sẽ là danh sách vật tĩnh dùng cho SLAM
-
-    // [OA-SLAM] Create total mask for dynamic objects (to filter out keypoints)
-    cv::Mat total_mask = cv::Mat::zeros(imRGB.rows, imRGB.cols, CV_8UC1);
-    
-    // [ADAPTIVE WEIGHT] Create mask for static objects (weight = 1.5)
-    cv::Mat static_object_mask = cv::Mat::zeros(imRGB.rows, imRGB.cols, CV_8UC1);
-
-    for (auto det : current_frame_detections_) {
-        // CASE 1: PERSON → mask + continue (không dùng cho SLAM)
-        if (det->category_id == PERSON_CATEGORY_ID) {
-            if (!det->mask.empty()) {
-                cv::bitwise_or(total_mask, det->mask, total_mask);
-            }
-            continue;
-        }
-        
-        // CASE 2 & 3: AprilTag + Static objects → push vào good_detections
-        if (det->score > 0.5) {
-            current_frame_good_detections_.push_back(det);  // ✅ Cả AprilTag và Static
-            
-            // Chỉ Static objects thêm mask (AprilTag dùng bbox riêng)
-            if (det->category_id != APRILTAG_CATEGORY_ID && !det->mask.empty()) {
-                cv::bitwise_or(static_object_mask, det->mask, static_object_mask);
-            }
-        }
-    }
-    
-    // Optional: Dilate the total mask to cover boundaries significantly
-    if (cv::countNonZero(total_mask) > 0) {
-        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(15, 15));
-        cv::dilate(total_mask, total_mask, kernel);
+            cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
     }
 
     if((fabs(mDepthMapFactor-1.0f)>1e-5) || imDepth.type()!=CV_32F)
         imDepth.convertTo(imDepth,CV_32F,mDepthMapFactor);
 
-    
-    mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth, total_mask);
-
-    // [ADAPTIVE WEIGHT] Assign static object mask to Frame
-    mCurrentFrame.mStaticObjectMask = static_object_mask.clone();
-
-    // Populate AprilTag bounding boxes (class_id = 0) for weighted pose optimization
-    const unsigned int APRILTAG_CLASS_ID = APRILTAG_CATEGORY_ID;
-    mCurrentFrame.mvAprilTagBboxes.clear();
-    for (const auto& det : current_frame_detections_) {
-        if (det->category_id == APRILTAG_CLASS_ID && det->score > 0.5) {
-            // BBox2 = Eigen::Vector4d (xmin, ymin, xmax, ymax)
-            int xmin = static_cast<int>(det->bbox[0]);
-            int ymin = static_cast<int>(det->bbox[1]);
-            int width = static_cast<int>(det->bbox[2] - det->bbox[0]);
-            int height = static_cast<int>(det->bbox[3] - det->bbox[1]);
-            // Only add valid bounding boxes
-            if (width > 0 && height > 0 && xmin >= 0 && ymin >= 0) {
-                cv::Rect rect(xmin, ymin, width, height);
-                mCurrentFrame.mvAprilTagBboxes.push_back(rect);
-            }
-        }
-    }
-
-    if (force_relocalize)
-    {
-        auto t1 = high_resolution_clock::now();
-
-        bool bOK = false;
-        if (mpSystem->GetRelocalizationMode() == RELOC_POINTS) {
-            std::cout << "Relocalize with points.\n";
-            bOK = Relocalization();
-        } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS) {
-            std::cout << "Relocalize with objects.\n";
-            bOK = RelocalizationFromObjects(false);
-        } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS_POINTS) {
-            std::cout << "Relocalize with objects and points.\n";
-            bOK = Relocalization();
-            if (!bOK)
-                bOK = RelocalizationFromObjects(true);
-        }
-
-        auto t2 = high_resolution_clock::now();
-        duration<double, std::milli> ms_double = t2 - t1;
-
-        mpFrameDrawer->Update(this);
-        if (bOK)
-            mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.mTcw);
-
-        mpSystem->relocalization_duration = ms_double.count();
-        mpSystem->relocalization_status = bOK;
-    }
-    else
-    {
-        Track();
-
-        // if (!mbOnlyTracking)    // if in localization-only mode, no neeed to track objects
-        //     break;
-
-        /////////////////////////////////// Objects Tracking ///////////////////////////////////
-        // Update mean depth
-        if (mState == Tracking::OK) {
-            Matrix34d Rt = cvToEigenMatrix<double, float, 3, 4>(mCurrentFrame.mTcw);
-            double z_mean = 0.0;
-            unsigned int z_nb = 0;
-            for(size_t i = 0; i < mCurrentFrame.mvpMapPoints.size(); i++) {
-                MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
-                if(pMP && !mCurrentFrame.mvbOutlier[i]) {
-                    cv::Mat mp =  pMP->GetWorldPos();
-                    Eigen::Vector4d p(mp.at<float>(0), mp.at<float>(1), mp.at<float>(2), 1.0);
-                    Eigen::Vector3d p_cam = Rt * p;
-                    z_mean += p_cam[2];
-                    z_nb++;
-                }
-            }
-            z_mean /= z_nb;
-            // std::cout << "Mean depth = " << z_mean << "\n";
-            current_mean_depth_ = z_mean;
-        }
-
-        //std::cout << "Frame " << current_frame_idx_ << " ===========\n";
-        // std::cout << "Created new KF: " << createdNewKeyFrame_ << "\n";
-        //std::cout << "Nb Object Tracks: " << objectTracks_.size() << "\n";
-        //std::cout << "Nb Map Objects  : " << mpMap->GetNumberMapObjects() << "\n";
-        // for (auto tr : objectTracks_) {
-        //     std::cout << "    - tr " << tr->GetId() << " : " << tr->GetNbObservations() << "\n";
-        // }
-
-        double MIN_2D_IOU_THRESH = OA_IOU2D;
-        double MIN_3D_IOU_THRESH = OA_IOU3D;
-        int TIME_DIFF_THRESH = 30;
+    if (mSensor == System::RGBD)
+        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
+    else if(mSensor == System::IMU_RGBD)
+        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
 
 
-        BBox2 img_bbox(0, 0, imRGB.cols, imRGB.rows);
-
-        if (mState == Tracking::OK) {
-
-            // Keep only detections with a certain score
-            if (current_frame_good_detections_.size() != 0) {
-
-                KeyFrame *kf = mpLastKeyFrame;
-                if (!createdNewKeyFrame_)
-                    kf = nullptr;
 
 
-                // pre-compute all the projections of all ellipsoids which already reconstructed
-                Matrix34d Rt = cvToEigenMatrix<double, float, 3, 4>(mCurrentFrame.mTcw);
-                Matrix34d P;
-                P = K_ * Rt;
-                std::unordered_map<ObjectTrack::Ptr, BBox2> proj_bboxes;
-                for (auto tr: objectTracks_) {
-                    if (tr->GetStatus() == ObjectTrackStatus::INITIALIZED ||
-                        tr->GetStatus() == ObjectTrackStatus::IN_MAP) {
-                        MapObject* obj = tr->GetMapObject();
-                        Eigen::Vector3d c = obj->GetEllipsoid().GetCenter();
-                        double z = Rt.row(2).dot(c.homogeneous());
-                        auto ell = obj->GetEllipsoid().project(P);
-                        BBox2 bb = ell.ComputeBbox();
-                        if (bboxes_intersection(bb, img_bbox) < 0.3 * bbox_area(bb)) {
-                            continue;
-                        }
-                        proj_bboxes[tr] = ell.ComputeBbox();
-
-                        // Check occlusions and keep only the nearest
-                        std::unordered_set<ObjectTrack::Ptr> hidden;
-                        for (auto it : proj_bboxes) {
-                            if (it.first != tr && bboxes_iou(it.second, bb) > 0.9) {
-                                Eigen::Vector3d c2 = it.first->GetMapObject()->GetEllipsoid().GetCenter();
-                                double z2 = Rt.row(2).dot(c2.homogeneous());
-                                if (z < z2) {
-                                    // remove z2
-                                    hidden.insert(it.first);
-                                } else {
-                                    // remove z
-                                    hidden.insert(tr);
-                                }
-                                break;
-                            }
-                        }
-                        for (auto hid : hidden) {
-                            proj_bboxes.erase(hid);
-                        }
-                    }
-                }
-
-                // find possible tracks
-                std::vector<ObjectTrack::Ptr> possible_tracks;
-                for (auto tr : objectTracks_) {
-                    auto bb = tr->GetLastBbox();
-                    if (tr->GetLastObsFrameId() + 60 >= current_frame_idx_ &&
-                        bboxes_intersection(bb, img_bbox) >= 0.3 * bbox_area(bb)) {
-                        possible_tracks.push_back(tr);
-                    } else if (proj_bboxes.find(tr) != proj_bboxes.end()) {
-                        possible_tracks.push_back(tr);
-                    }
-                }
-
-                // Associated map points to each detection
-                std::vector<std::unordered_set<MapPoint*>> assoc_map_points(current_frame_good_detections_.size());
-                for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
-                    for (size_t j = 0; j < mCurrentFrame.mvKeysUn.size(); ++j) {
-                        if (mCurrentFrame.mvpMapPoints[j]) {
-                            const auto& kp = mCurrentFrame.mvKeysUn[j];
-                            MapPoint* corresp_map_point = mCurrentFrame.mvpMapPoints[j];
-                            if (is_inside_bbox(kp.pt.x, kp.pt.y, current_frame_good_detections_[i]->bbox)) {
-                                assoc_map_points[i].insert(corresp_map_point);
-                            }
-                        }
-                    }
-                }
-
-                // Try to match detections to existing object track based on the associated map points
-                int THRESHOLD_NB_MATCH = 10;
-                std::vector<int> matched_by_points(current_frame_good_detections_.size(), -1);
-                std::vector<std::vector<size_t>> nb_matched_points(current_frame_good_detections_.size(), std::vector<size_t>());
-                for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
-                    int det_cat = current_frame_good_detections_[i]->category_id;
-                    size_t max_nb_matches = 0;
-                    size_t best_matched_track = 0;
-                    for (size_t j = 0; j < possible_tracks.size(); ++j) {
-                        auto tr_map_points = possible_tracks[j]->GetAssociatedMapPoints();
-                        size_t n = count_set_map_intersection(assoc_map_points[i], tr_map_points);
-                        if (n > max_nb_matches) {
-                            max_nb_matches = n;
-                            best_matched_track = j;
-                        }
-
-                        if (det_cat != possible_tracks[j]->GetCategoryId())
-                            n = 0;
-                        nb_matched_points[i].push_back(n);
-                    }
-
-                    if (max_nb_matches > THRESHOLD_NB_MATCH &&
-                        current_frame_good_detections_[i]->category_id == possible_tracks[best_matched_track]->GetCategoryId()) {
-                        matched_by_points[i] = best_matched_track;
-                    }
-                }
 
 
-                int m = std::max(possible_tracks.size(), current_frame_good_detections_.size());
-                dlib::matrix<long> cost = dlib::zeros_matrix<long>(m, m);
-                std::vector<long> assignment(m, std::numeric_limits<long>::max()); // Important to have it in 'long', max_int is used to force assignment of tracks already matched using points
-                if (current_frame_good_detections_.size() > 0)
-                {
-                    // std::cout << "Hungarian algorithm size " << m << "\n";
-                    for (size_t di = 0; di < current_frame_good_detections_.size(); ++di) {
-                        auto det = current_frame_good_detections_[di];
+    mCurrentFrame.mNameFile = filename;
+    mCurrentFrame.mnDataset = mnNumDataset;
 
-                        for (size_t ti = 0; ti < possible_tracks.size(); ++ti) {
-                            auto tr = possible_tracks[ti];
-                            if (tr->GetCategoryId() == det->category_id) {
-                                double iou_2d = 0;
-                                double iou_3d = 0;
+#ifdef REGISTER_TIMES
+    vdORBExtract_ms.push_back(mCurrentFrame.mTimeORB_Ext);
+#endif
 
-                                if (tr->GetLastObsFrameId() + TIME_DIFF_THRESH >= current_frame_idx_)
-                                    iou_2d = bboxes_iou(tr->GetLastBbox(), det->bbox);
+    Track();
 
-                                if (proj_bboxes.find(tr) != proj_bboxes.end())
-                                    iou_3d = bboxes_iou(proj_bboxes[tr], det->bbox);
-
-                                if (iou_2d < MIN_2D_IOU_THRESH) iou_2d = 0;
-                                if (iou_3d < MIN_3D_IOU_THRESH) iou_3d = 0;
-
-                                // std::cout << "2D: " << iou_2d << "\n";
-                                // std::cout << "3D: " << iou_3d << "\n";
-                                cost(di, ti) = std::max(iou_2d, iou_3d) * 1000;
-                            }
-                        }
-
-                        if (matched_by_points[di] != -1) {
-                            cost(di, matched_by_points[di]) = std::numeric_limits<int>::max();
-                        }
-                    }
-
-                    // for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
-                    //     for (size_t j = 0; j < possible_tracks.size(); ++j) {
-                    //         // std::cout << i << " " << j << " " << nb_matched_points[i][j] << "\n";
-                    //         cost(i, j) += nb_matched_points[i][j] * 1000;
-                    //     }
-                    // }
-
-                    assignment = dlib::max_cost_assignment(cost); // solve
-                }
-
-
-                std::vector<ObjectTrack::Ptr> new_tracks;
-                for (size_t di = 0; di < current_frame_good_detections_.size(); ++di) {
-                    auto det = current_frame_good_detections_[di];
-                    auto assigned_track_idx = assignment[di];
-                    if (assigned_track_idx >= static_cast<long>(possible_tracks.size()) || cost(di, assigned_track_idx) == 0) {
-                        // assigned to non-existing => means not assigned
-                        auto tr = ObjectTrack::CreateNewObjectTrack(det->category_id, det->bbox, det->score, Rt,
-                                                                    current_frame_idx_, this, kf);
-                        // std::cout << "create new track " << tr->GetId() << "\n";
-                        new_tracks.push_back(tr);
-                    } else {
-                        ObjectTrack::Ptr associated_track = possible_tracks[assigned_track_idx];
-                        associated_track->AddDetection(det->bbox, det->score, Rt, current_frame_idx_, kf);
-                        if (kf && associated_track->GetStatus() == ObjectTrackStatus::IN_MAP) {
-                            // std::cout << "Add modified objects" << std::endl;
-                            if (local_object_mapper_)
-                                local_object_mapper_->InsertModifiedObject(associated_track->GetMapObject());
-                        }
-                    }
-                }
-
-                for (auto tr : new_tracks)
-                    objectTracks_.push_back(tr);
-
-
-                if (!mbOnlyTracking) {
-                    for (auto& tr : objectTracks_) {
-                        if (tr->GetLastObsFrameId() == current_frame_idx_) {
-                            // Try reconstruct from points
-                            if ((tr->GetNbObservations() > OA_MIN_OBS && tr->GetStatus() == ObjectTrackStatus::ONLY_2D) ||
-                                (tr->GetNbObservations() % 2 == 0 && tr->GetStatus() == ObjectTrackStatus::INITIALIZED)) {
-                                // tr->ReconstructFromSamplesEllipsoid();
-                                // tr->ReconstructFromSamplesCenter();
-
-                            bool status_rec = tr->ReconstructFromCenter(); // try to reconstruct and change status to INITIALIZED if success
-                            // tr->ReconstructFromLandmarks(mpMap);
-                            // tr->ReconstructCrocco(false); // not working
-                            if (status_rec)
-                                tr->OptimizeReconstruction(mpMap);
-                            }
-                        }
-
-                        // Try to optimize objects and insert in the map
-                        if (tr->GetNbObservations() >= 40 && tr->GetStatus() == ObjectTrackStatus::INITIALIZED) {
-                            tr->OptimizeReconstruction(mpMap);
-                            // std::cout << "First opimitzation done.\n";
-                            auto checked = tr->CheckReprojectionIoU(0.3);
-                            // std::cout << "Check reprojection " << checked << ".\n";
-                            if (checked) {
-                                // Add object to map
-                                tr->InsertInMap(mpMap);
-                                // Add object in the local object mapping thread to run a fusion checking
-                                if (local_object_mapper_)
-                                    local_object_mapper_->InsertModifiedObject(tr->GetMapObject());
-                            } else {
-                                tr->SetIsBad(); // or only reset to ONLY_2D ?
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (!mbOnlyTracking) {
-                // Remove objects that are not tracked anymore and not initialized or in the map
-                for (ObjectTrack::Ptr tr : objectTracks_) {
-                    if (static_cast<int>(tr->GetLastObsFrameId()) < static_cast<int>(current_frame_idx_) - TIME_DIFF_THRESH
-                        && tr->GetStatus() != ObjectTrackStatus::IN_MAP) {
-                            tr->SetIsBad();
-                        }
-                }
-
-                // Clean bad objects
-                auto tr_it = objectTracks_.begin();
-                while (tr_it != objectTracks_.end()) {
-                    auto temp = *tr_it;
-                    ++tr_it;
-                    if (temp->IsBad())
-                        RemoveTrack(temp);
-                }
-            }
-        }
-
-        // std::cout << "Object Tracks: " << objectTracks_.size() << "\n";
-        mpFrameDrawer->Update(this);
-    }
-
-    if (mpARViewer) { // Update AR viewer camera
-        mpARViewer->UpdateFrame(im_rgb_);
-        if (mCurrentFrame.mTcw.rows == 4)
-            mpARViewer->SetCurrentCameraPose(cvToEigenMatrix<double, float, 3, 4>(mCurrentFrame.mTcw));
-    }
-
-    return mCurrentFrame.mTcw.clone();
+    return mCurrentFrame.GetPose();
 }
 
 
-cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
-                                     const std::vector<Detection::Ptr>& detections, bool force_relocalize)
+Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
 {
-    current_frame_idx_ = (current_frame_idx_ + 1) % (std::numeric_limits<size_t>::max()-1);
     mImGray = im;
-    im.copyTo(im_rgb_);
-
     if(mImGray.channels()==3)
     {
         if(mbRGB)
-            cvtColor(mImGray,mImGray,CV_RGB2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_RGB2GRAY);
         else
-            cvtColor(mImGray,mImGray,CV_BGR2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_BGR2GRAY);
     }
     else if(mImGray.channels()==4)
     {
         if(mbRGB)
-            cvtColor(mImGray,mImGray,CV_RGBA2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_RGBA2GRAY);
         else
-            cvtColor(mImGray,mImGray,CV_BGRA2GRAY);
+            cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
     }
 
-    // [MOVED UP] Process detections first to create mask for Frame
-    current_frame_detections_ = detections;
-    current_frame_good_detections_.clear(); // Đây sẽ là danh sách vật tĩnh dùng cho SLAM
-
-    // [OA-SLAM] Create total mask for dynamic objects
-    cv::Mat total_mask = cv::Mat::zeros(im.rows, im.cols, CV_8UC1);
-
-    for (auto det : current_frame_detections_) {
-        // CASE 1: Vật động (VD: người, class 0) -> Chỉ dùng để tạo Mask lọc Keypoint
-        if (det->category_id == OBJECT_CATEGORY_ID) { // Thay bằng 0 nếu là người
-             if (!det->mask.empty()) {
-                 cv::bitwise_or(total_mask, det->mask, total_mask);
-             }
-             // KHÔNG push vào current_frame_good_detections_ -> SLAM sẽ lờ đi
-             continue; 
-        }
-
-        // CASE 2: Vật tĩnh (đủ score) -> Dùng cho Object SLAM
-        if (det->score > 0.5) {
-            current_frame_good_detections_.push_back(det);
-            
-            // Nếu bạn muốn mask cả vật tĩnh (để tránh keypoint trên vật tĩnh) thì uncomment dòng dưới:
-            // if (!det->mask.empty()) cv::bitwise_or(total_mask, det->mask, total_mask);
-        }
-    }
-    
-    // Optional: Dilate the total mask to cover boundaries significantly
-    if (cv::countNonZero(total_mask) > 0) {
-        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(15, 15));
-        cv::dilate(total_mask, total_mask, kernel);
-    }
-
-    if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET){
-        mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth, total_mask);
-    } else {
-        mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth, total_mask);
-    }
-
-    if (force_relocalize)
+    if (mSensor == System::MONOCULAR)
     {
-        auto t1 = high_resolution_clock::now();
+        if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
+            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+        else
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+    }
+    else if(mSensor == System::IMU_MONOCULAR)
+    {
+        if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)
+        {
+            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
+        }
+        else
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
+    }
 
-        bool bOK = false;
-        if (mpSystem->GetRelocalizationMode() == RELOC_POINTS) {
-            std::cout << "Relocalize with points.\n";
-            bOK = Relocalization();
-        } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS) {
-            std::cout << "Relocalize with objects.\n";
-            bOK = RelocalizationFromObjects(false);
-        } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS_POINTS) {
-            std::cout << "Relocalize with objects and points.\n";
-            bOK = Relocalization();
-            if (!bOK)
-                bOK = RelocalizationFromObjects(true);
+    if (mState==NO_IMAGES_YET)
+        t0=timestamp;
+
+    mCurrentFrame.mNameFile = filename;
+    mCurrentFrame.mnDataset = mnNumDataset;
+
+#ifdef REGISTER_TIMES
+    vdORBExtract_ms.push_back(mCurrentFrame.mTimeORB_Ext);
+#endif
+
+    lastID = mCurrentFrame.mnId;
+    Track();
+
+    return mCurrentFrame.GetPose();
+}
+
+
+void Tracking::GrabImuData(const IMU::Point &imuMeasurement)
+{
+    unique_lock<mutex> lock(mMutexImuQueue);
+    mlQueueImuData.push_back(imuMeasurement);
+}
+
+void Tracking::PreintegrateIMU()
+{
+
+    if(!mCurrentFrame.mpPrevFrame)
+    {
+        Verbose::PrintMess("non prev frame ", Verbose::VERBOSITY_NORMAL);
+        mCurrentFrame.setIntegrated();
+        return;
+    }
+
+    mvImuFromLastFrame.clear();
+    mvImuFromLastFrame.reserve(mlQueueImuData.size());
+    if(mlQueueImuData.size() == 0)
+    {
+        Verbose::PrintMess("Not IMU data in mlQueueImuData!!", Verbose::VERBOSITY_NORMAL);
+        mCurrentFrame.setIntegrated();
+        return;
+    }
+
+    while(true)
+    {
+        bool bSleep = false;
+        {
+            unique_lock<mutex> lock(mMutexImuQueue);
+            if(!mlQueueImuData.empty())
+            {
+                IMU::Point* m = &mlQueueImuData.front();
+                cout.precision(17);
+                if(m->t<mCurrentFrame.mpPrevFrame->mTimeStamp-mImuPer)
+                {
+                    mlQueueImuData.pop_front();
+                }
+                else if(m->t<mCurrentFrame.mTimeStamp-mImuPer)
+                {
+                    mvImuFromLastFrame.push_back(*m);
+                    mlQueueImuData.pop_front();
+                }
+                else
+                {
+                    mvImuFromLastFrame.push_back(*m);
+                    break;
+                }
+            }
+            else
+            {
+                break;
+                bSleep = true;
+            }
+        }
+        if(bSleep)
+            usleep(500);
+    }
+
+    const int n = mvImuFromLastFrame.size()-1;
+    if(n==0){
+        cout << "Empty IMU measurements vector!!!\n";
+        return;
+    }
+
+    IMU::Preintegrated* pImuPreintegratedFromLastFrame = new IMU::Preintegrated(mLastFrame.mImuBias,mCurrentFrame.mImuCalib);
+
+    for(int i=0; i<n; i++)
+    {
+        float tstep;
+        Eigen::Vector3f acc, angVel;
+        if((i==0) && (i<(n-1)))
+        {
+            float tab = mvImuFromLastFrame[i+1].t-mvImuFromLastFrame[i].t;
+            float tini = mvImuFromLastFrame[i].t-mCurrentFrame.mpPrevFrame->mTimeStamp;
+            acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
+                    (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tini/tab))*0.5f;
+            angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w-
+                    (mvImuFromLastFrame[i+1].w-mvImuFromLastFrame[i].w)*(tini/tab))*0.5f;
+            tstep = mvImuFromLastFrame[i+1].t-mCurrentFrame.mpPrevFrame->mTimeStamp;
+        }
+        else if(i<(n-1))
+        {
+            acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a)*0.5f;
+            angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w)*0.5f;
+            tstep = mvImuFromLastFrame[i+1].t-mvImuFromLastFrame[i].t;
+        }
+        else if((i>0) && (i==(n-1)))
+        {
+            float tab = mvImuFromLastFrame[i+1].t-mvImuFromLastFrame[i].t;
+            float tend = mvImuFromLastFrame[i+1].t-mCurrentFrame.mTimeStamp;
+            acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
+                    (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tend/tab))*0.5f;
+            angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w-
+                    (mvImuFromLastFrame[i+1].w-mvImuFromLastFrame[i].w)*(tend/tab))*0.5f;
+            tstep = mCurrentFrame.mTimeStamp-mvImuFromLastFrame[i].t;
+        }
+        else if((i==0) && (i==(n-1)))
+        {
+            acc = mvImuFromLastFrame[i].a;
+            angVel = mvImuFromLastFrame[i].w;
+            tstep = mCurrentFrame.mTimeStamp-mCurrentFrame.mpPrevFrame->mTimeStamp;
         }
 
-        auto t2 = high_resolution_clock::now();
-        duration<double, std::milli> ms_double = t2 - t1;
+        if (!mpImuPreintegratedFromLastKF)
+            cout << "mpImuPreintegratedFromLastKF does not exist" << endl;
+        mpImuPreintegratedFromLastKF->IntegrateNewMeasurement(acc,angVel,tstep);
+        pImuPreintegratedFromLastFrame->IntegrateNewMeasurement(acc,angVel,tstep);
+    }
 
-        mpFrameDrawer->Update(this);
-        if (bOK)
-            mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.mTcw);
+    mCurrentFrame.mpImuPreintegratedFrame = pImuPreintegratedFromLastFrame;
+    mCurrentFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
+    mCurrentFrame.mpLastKeyFrame = mpLastKeyFrame;
 
-        mpSystem->relocalization_duration = ms_double.count();
-        mpSystem->relocalization_status = bOK;
+    mCurrentFrame.setIntegrated();
+
+    //Verbose::PrintMess("Preintegration is finished!! ", Verbose::VERBOSITY_DEBUG);
+}
+
+
+bool Tracking::PredictStateIMU()
+{
+    if(!mCurrentFrame.mpPrevFrame)
+    {
+        Verbose::PrintMess("No last frame", Verbose::VERBOSITY_NORMAL);
+        return false;
+    }
+
+    if(mbMapUpdated && mpLastKeyFrame)
+    {
+        const Eigen::Vector3f twb1 = mpLastKeyFrame->GetImuPosition();
+        const Eigen::Matrix3f Rwb1 = mpLastKeyFrame->GetImuRotation();
+        const Eigen::Vector3f Vwb1 = mpLastKeyFrame->GetVelocity();
+
+        const Eigen::Vector3f Gz(0, 0, -IMU::GRAVITY_VALUE);
+        const float t12 = mpImuPreintegratedFromLastKF->dT;
+
+        Eigen::Matrix3f Rwb2 = IMU::NormalizeRotation(Rwb1 * mpImuPreintegratedFromLastKF->GetDeltaRotation(mpLastKeyFrame->GetImuBias()));
+        Eigen::Vector3f twb2 = twb1 + Vwb1*t12 + 0.5f*t12*t12*Gz+ Rwb1*mpImuPreintegratedFromLastKF->GetDeltaPosition(mpLastKeyFrame->GetImuBias());
+        Eigen::Vector3f Vwb2 = Vwb1 + t12*Gz + Rwb1 * mpImuPreintegratedFromLastKF->GetDeltaVelocity(mpLastKeyFrame->GetImuBias());
+        mCurrentFrame.SetImuPoseVelocity(Rwb2,twb2,Vwb2);
+
+        mCurrentFrame.mImuBias = mpLastKeyFrame->GetImuBias();
+        mCurrentFrame.mPredBias = mCurrentFrame.mImuBias;
+        return true;
+    }
+    else if(!mbMapUpdated)
+    {
+        const Eigen::Vector3f twb1 = mLastFrame.GetImuPosition();
+        const Eigen::Matrix3f Rwb1 = mLastFrame.GetImuRotation();
+        const Eigen::Vector3f Vwb1 = mLastFrame.GetVelocity();
+        const Eigen::Vector3f Gz(0, 0, -IMU::GRAVITY_VALUE);
+        const float t12 = mCurrentFrame.mpImuPreintegratedFrame->dT;
+
+        Eigen::Matrix3f Rwb2 = IMU::NormalizeRotation(Rwb1 * mCurrentFrame.mpImuPreintegratedFrame->GetDeltaRotation(mLastFrame.mImuBias));
+        Eigen::Vector3f twb2 = twb1 + Vwb1*t12 + 0.5f*t12*t12*Gz+ Rwb1 * mCurrentFrame.mpImuPreintegratedFrame->GetDeltaPosition(mLastFrame.mImuBias);
+        Eigen::Vector3f Vwb2 = Vwb1 + t12*Gz + Rwb1 * mCurrentFrame.mpImuPreintegratedFrame->GetDeltaVelocity(mLastFrame.mImuBias);
+
+        mCurrentFrame.SetImuPoseVelocity(Rwb2,twb2,Vwb2);
+
+        mCurrentFrame.mImuBias = mLastFrame.mImuBias;
+        mCurrentFrame.mPredBias = mCurrentFrame.mImuBias;
+        return true;
     }
     else
-    {
-        Track();
+        cout << "not IMU prediction!!" << endl;
 
-        // if (!mbOnlyTracking)    // if in localization-only mode, no neeed to track objects
-        //     break;
-
-        /////////////////////////////////// Objects Tracking ///////////////////////////////////
-        // Update mean depth
-        if (mState == Tracking::OK) {
-            Matrix34d Rt = cvToEigenMatrix<double, float, 3, 4>(mCurrentFrame.mTcw);
-            double z_mean = 0.0;
-            unsigned int z_nb = 0;
-            for(size_t i = 0; i < mCurrentFrame.mvpMapPoints.size(); i++) {
-                MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
-                if(pMP && !mCurrentFrame.mvbOutlier[i]) {
-                    cv::Mat mp =  pMP->GetWorldPos();
-                    Eigen::Vector4d p(mp.at<float>(0), mp.at<float>(1), mp.at<float>(2), 1.0);
-                    Eigen::Vector3d p_cam = Rt * p;
-                    z_mean += p_cam[2];
-                    z_nb++;
-                }
-            }
-            z_mean /= z_nb;
-            // std::cout << "Mean depth = " << z_mean << "\n";
-            current_mean_depth_ = z_mean;
-        }
-
-        //std::cout << "Frame " << current_frame_idx_ << " ===========\n";
-        // std::cout << "Created new KF: " << createdNewKeyFrame_ << "\n";
-        //std::cout << "Nb Object Tracks: " << objectTracks_.size() << "\n";
-        //std::cout << "Nb Map Objects  : " << mpMap->GetNumberMapObjects() << "\n";
-        // for (auto tr : objectTracks_) {
-        //     std::cout << "    - tr " << tr->GetId() << " : " << tr->GetNbObservations() << "\n";
-        // }
-
-        double MIN_2D_IOU_THRESH = OA_IOU2D;
-        double MIN_3D_IOU_THRESH = OA_IOU3D;
-        int TIME_DIFF_THRESH = 30;
-
-
-        BBox2 img_bbox(0, 0, im.cols, im.rows);
-
-        if (mState == Tracking::OK) {
-
-            // Keep only detections with a certain score
-            if (current_frame_good_detections_.size() != 0) {
-
-                KeyFrame *kf = mpLastKeyFrame;
-                if (!createdNewKeyFrame_)
-                    kf = nullptr;
-
-
-                // pre-compute all the projections of all ellipsoids which already reconstructed
-                Matrix34d Rt = cvToEigenMatrix<double, float, 3, 4>(mCurrentFrame.mTcw);
-                Matrix34d P;
-                P = K_ * Rt;
-                std::unordered_map<ObjectTrack::Ptr, BBox2> proj_bboxes;
-                for (auto tr: objectTracks_) {
-                    if (tr->GetStatus() == ObjectTrackStatus::INITIALIZED ||
-                        tr->GetStatus() == ObjectTrackStatus::IN_MAP) {
-                        MapObject* obj = tr->GetMapObject();
-                        Eigen::Vector3d c = obj->GetEllipsoid().GetCenter();
-                        double z = Rt.row(2).dot(c.homogeneous());
-                        auto ell = obj->GetEllipsoid().project(P);
-                        BBox2 bb = ell.ComputeBbox();
-                        if (bboxes_intersection(bb, img_bbox) < 0.3 * bbox_area(bb)) {
-                            continue;
-                        }
-                        proj_bboxes[tr] = ell.ComputeBbox();
-
-                        // Check occlusions and keep only the nearest
-                        std::unordered_set<ObjectTrack::Ptr> hidden;
-                        for (auto it : proj_bboxes) {
-                            if (it.first != tr && bboxes_iou(it.second, bb) > 0.9) {
-                                Eigen::Vector3d c2 = it.first->GetMapObject()->GetEllipsoid().GetCenter();
-                                double z2 = Rt.row(2).dot(c2.homogeneous());
-                                if (z < z2) {
-                                    // remove z2
-                                    hidden.insert(it.first);
-                                } else {
-                                    // remove z
-                                    hidden.insert(tr);
-                                }
-                                break;
-                            }
-                        }
-                        for (auto hid : hidden) {
-                            proj_bboxes.erase(hid);
-                        }
-                    }
-                }
-
-                // find possible tracks
-                std::vector<ObjectTrack::Ptr> possible_tracks;
-                for (auto tr : objectTracks_) {
-                    auto bb = tr->GetLastBbox();
-                    if (tr->GetLastObsFrameId() + 60 >= current_frame_idx_ &&
-                        bboxes_intersection(bb, img_bbox) >= 0.3 * bbox_area(bb)) {
-                        possible_tracks.push_back(tr);
-                    } else if (proj_bboxes.find(tr) != proj_bboxes.end()) {
-                        possible_tracks.push_back(tr);
-                    }
-                }
-
-                // Associated map points to each detection
-                std::vector<std::unordered_set<MapPoint*>> assoc_map_points(current_frame_good_detections_.size());
-                for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
-                    for (size_t j = 0; j < mCurrentFrame.mvKeysUn.size(); ++j) {
-                        if (mCurrentFrame.mvpMapPoints[j]) {
-                            const auto& kp = mCurrentFrame.mvKeysUn[j];
-                            MapPoint* corresp_map_point = mCurrentFrame.mvpMapPoints[j];
-                            if (is_inside_bbox(kp.pt.x, kp.pt.y, current_frame_good_detections_[i]->bbox)) {
-                                assoc_map_points[i].insert(corresp_map_point);
-                            }
-                        }
-                    }
-                }
-
-                // Try to match detections to existing object track based on the associated map points
-                int THRESHOLD_NB_MATCH = 10;
-                std::vector<int> matched_by_points(current_frame_good_detections_.size(), -1);
-                std::vector<std::vector<size_t>> nb_matched_points(current_frame_good_detections_.size(), std::vector<size_t>());
-                for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
-                    int det_cat = current_frame_good_detections_[i]->category_id;
-                    size_t max_nb_matches = 0;
-                    size_t best_matched_track = 0;
-                    for (size_t j = 0; j < possible_tracks.size(); ++j) {
-                        auto tr_map_points = possible_tracks[j]->GetAssociatedMapPoints();
-                        size_t n = count_set_map_intersection(assoc_map_points[i], tr_map_points);
-                        if (n > max_nb_matches) {
-                            max_nb_matches = n;
-                            best_matched_track = j;
-                        }
-
-                        if (det_cat != possible_tracks[j]->GetCategoryId())
-                            n = 0;
-                        nb_matched_points[i].push_back(n);
-                    }
-
-                    if (max_nb_matches > THRESHOLD_NB_MATCH &&
-                        current_frame_good_detections_[i]->category_id == possible_tracks[best_matched_track]->GetCategoryId()) {
-                        matched_by_points[i] = best_matched_track;
-                    }
-                }
-
-
-                int m = std::max(possible_tracks.size(), current_frame_good_detections_.size());
-                dlib::matrix<long> cost = dlib::zeros_matrix<long>(m, m);
-                std::vector<long> assignment(m, std::numeric_limits<long>::max()); // Important to have it in 'long', max_int is used to force assignment of tracks already matched using points
-                if (current_frame_good_detections_.size() > 0)
-                {
-                    // std::cout << "Hungarian algorithm size " << m << "\n";
-                    for (size_t di = 0; di < current_frame_good_detections_.size(); ++di) {
-                        auto det = current_frame_good_detections_[di];
-
-                        for (size_t ti = 0; ti < possible_tracks.size(); ++ti) {
-                            auto tr = possible_tracks[ti];
-                            if (tr->GetCategoryId() == det->category_id) {
-                                double iou_2d = 0;
-                                double iou_3d = 0;
-
-                                if (tr->GetLastObsFrameId() + TIME_DIFF_THRESH >= current_frame_idx_)
-                                    iou_2d = bboxes_iou(tr->GetLastBbox(), det->bbox);
-
-                                if (proj_bboxes.find(tr) != proj_bboxes.end())
-                                    iou_3d = bboxes_iou(proj_bboxes[tr], det->bbox);
-
-                                if (iou_2d < MIN_2D_IOU_THRESH) iou_2d = 0;
-                                if (iou_3d < MIN_3D_IOU_THRESH) iou_3d = 0;
-
-                                // std::cout << "2D: " << iou_2d << "\n";
-                                // std::cout << "3D: " << iou_3d << "\n";
-                                cost(di, ti) = std::max(iou_2d, iou_3d) * 1000;
-                            }
-                        }
-
-                        if (matched_by_points[di] != -1) {
-                            cost(di, matched_by_points[di]) = std::numeric_limits<int>::max();
-                        }
-                    }
-
-                    // for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
-                    //     for (size_t j = 0; j < possible_tracks.size(); ++j) {
-                    //         // std::cout << i << " " << j << " " << nb_matched_points[i][j] << "\n";
-                    //         cost(i, j) += nb_matched_points[i][j] * 1000;
-                    //     }
-                    // }
-
-                    assignment = dlib::max_cost_assignment(cost); // solve
-                }
-
-
-                std::vector<ObjectTrack::Ptr> new_tracks;
-                for (size_t di = 0; di < current_frame_good_detections_.size(); ++di) {
-                    auto det = current_frame_good_detections_[di];
-                    auto assigned_track_idx = assignment[di];
-                    if (assigned_track_idx >= static_cast<long>(possible_tracks.size()) || cost(di, assigned_track_idx) == 0) {
-                        // assigned to non-existing => means not assigned
-                        auto tr = ObjectTrack::CreateNewObjectTrack(det->category_id, det->bbox, det->score, Rt,
-                                                                    current_frame_idx_, this, kf);
-                        // std::cout << "create new track " << tr->GetId() << "\n";
-                        new_tracks.push_back(tr);
-                    } else {
-                        ObjectTrack::Ptr associated_track = possible_tracks[assigned_track_idx];
-                        associated_track->AddDetection(det->bbox, det->score, Rt, current_frame_idx_, kf);
-                        if (kf && associated_track->GetStatus() == ObjectTrackStatus::IN_MAP) {
-                            // std::cout << "Add modified objects" << std::endl;
-                            if (local_object_mapper_)
-                                local_object_mapper_->InsertModifiedObject(associated_track->GetMapObject());
-                        }
-                    }
-                }
-
-                for (auto tr : new_tracks)
-                    objectTracks_.push_back(tr);
-
-
-                if (!mbOnlyTracking) {
-                    for (auto& tr : objectTracks_) {
-                        if (tr->GetLastObsFrameId() == current_frame_idx_) {
-                            // Try reconstruct from points
-                            if ((tr->GetNbObservations() > OA_MIN_OBS && tr->GetStatus() == ObjectTrackStatus::ONLY_2D) ||
-                                (tr->GetNbObservations() % 2 == 0 && tr->GetStatus() == ObjectTrackStatus::INITIALIZED)) {
-                                // tr->ReconstructFromSamplesEllipsoid();
-                                // tr->ReconstructFromSamplesCenter();
-
-                            bool status_rec = tr->ReconstructFromCenter(); // try to reconstruct and change status to INITIALIZED if success
-                            // tr->ReconstructFromLandmarks(mpMap);
-                            // tr->ReconstructCrocco(false); // not working
-                            if (status_rec)
-                                tr->OptimizeReconstruction(mpMap);
-                            }
-                        }
-
-                        // Try to optimize objects and insert in the map
-                        if (tr->GetNbObservations() >= 40 && tr->GetStatus() == ObjectTrackStatus::INITIALIZED) {
-                            tr->OptimizeReconstruction(mpMap);
-                            // std::cout << "First opimitzation done.\n";
-                            auto checked = tr->CheckReprojectionIoU(0.3);
-                            // std::cout << "Check reprojection " << checked << ".\n";
-                            if (checked) {
-                                // Add object to map
-                                tr->InsertInMap(mpMap);
-                                // Add object in the local object mapping thread to run a fusion checking
-                                if (local_object_mapper_)
-                                    local_object_mapper_->InsertModifiedObject(tr->GetMapObject());
-                            } else {
-                                tr->SetIsBad(); // or only reset to ONLY_2D ?
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (!mbOnlyTracking) {
-                // Remove objects that are not tracked anymore and not initialized or in the map
-                for (ObjectTrack::Ptr tr : objectTracks_) {
-                    if (static_cast<int>(tr->GetLastObsFrameId()) < static_cast<int>(current_frame_idx_) - TIME_DIFF_THRESH
-                        && tr->GetStatus() != ObjectTrackStatus::IN_MAP) {
-                            tr->SetIsBad();
-                        }
-                }
-
-                // Clean bad objects
-                auto tr_it = objectTracks_.begin();
-                while (tr_it != objectTracks_.end()) {
-                    auto temp = *tr_it;
-                    ++tr_it;
-                    if (temp->IsBad())
-                        RemoveTrack(temp);
-                }
-            }
-        }
-
-        // std::cout << "Object Tracks: " << objectTracks_.size() << "\n";
-        mpFrameDrawer->Update(this);
-    }
-
-    if (mpARViewer) { // Update AR viewer camera
-        mpARViewer->UpdateFrame(im_rgb_);
-        if (mCurrentFrame.mTcw.rows == 4)
-            mpARViewer->SetCurrentCameraPose(cvToEigenMatrix<double, float, 3, 4>(mCurrentFrame.mTcw));
-    }
-
-    return mCurrentFrame.mTcw.clone();
+    return false;
 }
 
-void Tracking::RemoveTrack(ObjectTrack::Ptr track)
+void Tracking::ResetFrameIMU()
 {
-    if (track->GetMapObject())
-        mpMap->EraseMapObject(track->GetMapObject());
-    objectTracks_.remove(track);
+    // TODO To implement...
 }
+
 
 void Tracking::Track()
 {
-    createdNewKeyFrame_ = false;
+
+    if (bStepByStep)
+    {
+        std::cout << "Tracking: Waiting to the next step" << std::endl;
+        while(!mbStep && bStepByStep)
+            usleep(500);
+        mbStep = false;
+    }
+
+    if(mpLocalMapper->mbBadImu)
+    {
+        cout << "TRACK: Reset map because local mapper set the bad imu flag " << endl;
+        mpSystem->ResetActiveMap();
+        return;
+    }
+
+    Map* pCurrentMap = mpAtlas->GetCurrentMap();
+    if(!pCurrentMap)
+    {
+        cout << "ERROR: There is not an active map in the atlas" << endl;
+    }
+
+    if(mState!=NO_IMAGES_YET)
+    {
+        if(mLastFrame.mTimeStamp>mCurrentFrame.mTimeStamp)
+        {
+            cerr << "ERROR: Frame with a timestamp older than previous frame detected!" << endl;
+            unique_lock<mutex> lock(mMutexImuQueue);
+            mlQueueImuData.clear();
+            CreateMapInAtlas();
+            return;
+        }
+        else if(mCurrentFrame.mTimeStamp>mLastFrame.mTimeStamp+1.0)
+        {
+            // cout << mCurrentFrame.mTimeStamp << ", " << mLastFrame.mTimeStamp << endl;
+            // cout << "id last: " << mLastFrame.mnId << "    id curr: " << mCurrentFrame.mnId << endl;
+            if(mpAtlas->isInertial())
+            {
+
+                if(mpAtlas->isImuInitialized())
+                {
+                    cout << "Timestamp jump detected. State set to LOST. Reseting IMU integration..." << endl;
+                    if(!pCurrentMap->GetIniertialBA2())
+                    {
+                        mpSystem->ResetActiveMap();
+                    }
+                    else
+                    {
+                        CreateMapInAtlas();
+                    }
+                }
+                else
+                {
+                    cout << "Timestamp jump detected, before IMU initialization. Reseting..." << endl;
+                    mpSystem->ResetActiveMap();
+                }
+                return;
+            }
+
+        }
+    }
+
+
+    if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && mpLastKeyFrame)
+        mCurrentFrame.SetNewBias(mpLastKeyFrame->GetImuBias());
+
     if(mState==NO_IMAGES_YET)
     {
         mState = NOT_INITIALIZED;
@@ -1077,103 +1866,188 @@ void Tracking::Track()
 
     mLastProcessedState=mState;
 
-    // Get Map Mutex -> Map cannot be changed
-    unique_lock<mutex> lock(mpMap->mMutexMapUpdate);
+    if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mbCreatedMap)
+    {
+#ifdef REGISTER_TIMES
+        std::chrono::steady_clock::time_point time_StartPreIMU = std::chrono::steady_clock::now();
+#endif
+        PreintegrateIMU();
+#ifdef REGISTER_TIMES
+        std::chrono::steady_clock::time_point time_EndPreIMU = std::chrono::steady_clock::now();
 
-    // int debug = 0; // for starting a new map without reset
+        double timePreImu = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndPreIMU - time_StartPreIMU).count();
+        vdIMUInteg_ms.push_back(timePreImu);
+#endif
+
+    }
+    mbCreatedMap = false;
+
+    // Get Map Mutex -> Map cannot be changed
+    unique_lock<mutex> lock(pCurrentMap->mMutexMapUpdate);
+
+    mbMapUpdated = false;
+
+    int nCurMapChangeIndex = pCurrentMap->GetMapChangeIndex();
+    int nMapChangeIndex = pCurrentMap->GetLastMapChange();
+    if(nCurMapChangeIndex>nMapChangeIndex)
+    {
+        pCurrentMap->SetLastMapChange(nCurMapChangeIndex);
+        mbMapUpdated = true;
+    }
+
 
     if(mState==NOT_INITIALIZED)
     {
-        if(mSensor==System::STEREO || mSensor==System::RGBD)
+        if(mSensor==System::STEREO || mSensor==System::RGBD || mSensor==System::IMU_STEREO || mSensor==System::IMU_RGBD)
+        {
             StereoInitialization();
+        }
         else
+        {
             MonocularInitialization();
+        }
 
-        mpFrameDrawer->Update(this);
+        //mpFrameDrawer->Update(this);
 
-        if(mState!=OK)
+        if(mState!=OK) // If rightly initialized, mState=OK
+        {
+            mLastFrame = Frame(mCurrentFrame);
             return;
+        }
+
+        if(mpAtlas->GetAllMaps().size() == 1)
+        {
+            mnFirstFrameId = mCurrentFrame.mnId;
+        }
     }
     else
     {
         // System is initialized. Track Frame.
         bool bOK;
 
+#ifdef REGISTER_TIMES
+        std::chrono::steady_clock::time_point time_StartPosePred = std::chrono::steady_clock::now();
+#endif
+
         // Initial camera pose estimation using motion model or relocalization (if tracking is lost)
         if(!mbOnlyTracking)
         {
+
+            // State OK
             // Local Mapping is activated. This is the normal behaviour, unless
             // you explicitly activate the "only tracking" mode.
-
             if(mState==OK)
             {
+
                 // Local Mapping might have changed some MapPoints tracked in last frame
                 CheckReplacedInLastFrame();
 
-                if(mVelocity.empty() || mCurrentFrame.mnId<mnLastRelocFrameId+2)
+                if((!mbVelocity && !pCurrentMap->isImuInitialized()) || mCurrentFrame.mnId<mnLastRelocFrameId+2)
                 {
+                    Verbose::PrintMess("TRACK: Track with respect to the reference KF ", Verbose::VERBOSITY_DEBUG);
                     bOK = TrackReferenceKeyFrame();
                 }
                 else
                 {
+                    Verbose::PrintMess("TRACK: Track with motion model", Verbose::VERBOSITY_DEBUG);
                     bOK = TrackWithMotionModel();
                     if(!bOK)
                         bOK = TrackReferenceKeyFrame();
                 }
 
-                // if (bOK)
-                //     std::cout << "Tracking is OK\n";
-                // else
-                //     std::cout << "Tracking failed\n";
+
+                if (!bOK)
+                {
+                    if ( mCurrentFrame.mnId<=(mnLastRelocFrameId+mnFramesToResetIMU) &&
+                         (mSensor==System::IMU_MONOCULAR || mSensor==System::IMU_STEREO || mSensor == System::IMU_RGBD))
+                    {
+                        mState = LOST;
+                    }
+                    else if(pCurrentMap->KeyFramesInMap()>10)
+                    {
+                        // cout << "KF in map: " << pCurrentMap->KeyFramesInMap() << endl;
+                        mState = RECENTLY_LOST;
+                        mTimeStampLost = mCurrentFrame.mTimeStamp;
+                    }
+                    else
+                    {
+                        mState = LOST;
+                    }
+                }
             }
             else
             {
-                if (mpSystem->GetRelocalizationMode() == RELOC_POINTS) {
-                    std::cout << "Relocalize with points.\n";
-                    bOK = Relocalization();
-                } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS) {
-                    std::cout << "Relocalize with objects.\n";
-                    bOK = RelocalizationFromObjects(false);
-                } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS_POINTS) {
-                    std::cout << "Relocalize with objects and points.\n";
-                    bOK = Relocalization();
-                    if (!bOK)
-                        bOK = RelocalizationFromObjects(true);
-                }
 
-                if (bOK)
-                    std::cout << "Relocalization is OK\n";
-                else {
-                    std::cout << "Relocalization failed\n";
+                if (mState == RECENTLY_LOST)
+                {
+                    Verbose::PrintMess("Lost for a short time", Verbose::VERBOSITY_NORMAL);
+
+                    bOK = true;
+                    if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
+                    {
+                        if(pCurrentMap->isImuInitialized())
+                            PredictStateIMU();
+                        else
+                            bOK = false;
+
+                        if (mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
+                        {
+                            mState = LOST;
+                            Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
+                            bOK=false;
+                        }
+                    }
+                    else
+                    {
+                        // Relocalization
+                        bOK = Relocalization();
+                        //std::cout << "mCurrentFrame.mTimeStamp:" << to_string(mCurrentFrame.mTimeStamp) << std::endl;
+                        //std::cout << "mTimeStampLost:" << to_string(mTimeStampLost) << std::endl;
+                        if(mCurrentFrame.mTimeStamp-mTimeStampLost>3.0f && !bOK)
+                        {
+                            mState = LOST;
+                            Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
+                            bOK=false;
+                        }
+                    }
+                }
+                else if (mState == LOST)
+                {
+
+                    Verbose::PrintMess("A new map is started...", Verbose::VERBOSITY_NORMAL);
+
+                    if (pCurrentMap->KeyFramesInMap()<10)
+                    {
+                        mpSystem->ResetActiveMap();
+                        Verbose::PrintMess("Reseting current map...", Verbose::VERBOSITY_NORMAL);
+                    }else
+                        CreateMapInAtlas();
+
+                    if(mpLastKeyFrame)
+                        mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+
+                    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+
+                    return;
                 }
             }
+
         }
         else
         {
-            // Localization Mode: Local Mapping is deactivated
-            // std::cout << "Tracking: Mapping is disabled \n";
+            // Localization Mode: Local Mapping is deactivated (TODO Not available in inertial mode)
             if(mState==LOST)
             {
-                if (mpSystem->GetRelocalizationMode() == RELOC_POINTS) {
-                    std::cout << "Relocalize with points.\n";
-                    bOK = Relocalization();
-                } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS) {
-                    std::cout << "Relocalize with objects.\n";
-                    bOK = RelocalizationFromObjects(false);
-                } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS_POINTS) {
-                    std::cout << "Relocalize with objects and points.\n";
-                    bOK = Relocalization();
-                    if (!bOK)
-                        bOK = RelocalizationFromObjects(true);
-                }
+                if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+                    Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
+                bOK = Relocalization();
             }
             else
             {
                 if(!mbVO)
                 {
                     // In last frame we tracked enough MapPoints in the map
-
-                    if(!mVelocity.empty())
+                    if(mbVelocity)
                     {
                         bOK = TrackWithMotionModel();
                     }
@@ -1194,13 +2068,13 @@ void Tracking::Track()
                     bool bOKReloc = false;
                     vector<MapPoint*> vpMPsMM;
                     vector<bool> vbOutMM;
-                    cv::Mat TcwMM;
-                    if(!mVelocity.empty())
+                    Sophus::SE3f TcwMM;
+                    if(mbVelocity)
                     {
                         bOKMM = TrackWithMotionModel();
                         vpMPsMM = mCurrentFrame.mvpMapPoints;
                         vbOutMM = mCurrentFrame.mvbOutlier;
-                        TcwMM = mCurrentFrame.mTcw.clone();
+                        TcwMM = mCurrentFrame.GetPose();
                     }
                     bOKReloc = Relocalization();
 
@@ -1230,13 +2104,31 @@ void Tracking::Track()
                 }
             }
         }
-        mCurrentFrame.mpReferenceKF = mpReferenceKF;
 
+        if(!mCurrentFrame.mpReferenceKF)
+            mCurrentFrame.mpReferenceKF = mpReferenceKF;
+
+#ifdef REGISTER_TIMES
+        std::chrono::steady_clock::time_point time_EndPosePred = std::chrono::steady_clock::now();
+
+        double timePosePred = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndPosePred - time_StartPosePred).count();
+        vdPosePred_ms.push_back(timePosePred);
+#endif
+
+
+#ifdef REGISTER_TIMES
+        std::chrono::steady_clock::time_point time_StartLMTrack = std::chrono::steady_clock::now();
+#endif
         // If we have an initial estimation of the camera pose and matching. Track the local map.
         if(!mbOnlyTracking)
         {
             if(bOK)
+            {
                 bOK = TrackLocalMap();
+
+            }
+            if(!bOK)
+                cout << "Fail to track local map!" << endl;
         }
         else
         {
@@ -1249,27 +2141,82 @@ void Tracking::Track()
 
         if(bOK)
             mState = OK;
-        else
-            mState=LOST;
-
-        // // Update drawer
-        // mpFrameDrawer->Update(this);
-
-        // If tracking were good, check if we insert a keyframe
-        if(bOK)
+        else if (mState == OK)
         {
-            // Update motion model
-            if(!mLastFrame.mTcw.empty())
+            if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
             {
-                cv::Mat LastTwc = cv::Mat::eye(4,4,CV_32F);
-                mLastFrame.GetRotationInverse().copyTo(LastTwc.rowRange(0,3).colRange(0,3));
-                mLastFrame.GetCameraCenter().copyTo(LastTwc.rowRange(0,3).col(3));
-                mVelocity = mCurrentFrame.mTcw*LastTwc;
+                Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
+                if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
+                {
+                    cout << "IMU is not or recently initialized. Reseting active map..." << endl;
+                    mpSystem->ResetActiveMap();
+                }
+
+                mState=RECENTLY_LOST;
             }
             else
-                mVelocity = cv::Mat();
+                mState=RECENTLY_LOST; // visual to lost
 
-            mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.mTcw);
+            /*if(mCurrentFrame.mnId>mnLastRelocFrameId+mMaxFrames)
+            {*/
+                mTimeStampLost = mCurrentFrame.mTimeStamp;
+            //}
+        }
+
+        // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
+        if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) &&
+           (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && pCurrentMap->isImuInitialized())
+        {
+            // TODO check this situation
+            Verbose::PrintMess("Saving pointer to frame. imu needs reset...", Verbose::VERBOSITY_NORMAL);
+            Frame* pF = new Frame(mCurrentFrame);
+            pF->mpPrevFrame = new Frame(mLastFrame);
+
+            // Load preintegration
+            pF->mpImuPreintegratedFrame = new IMU::Preintegrated(mCurrentFrame.mpImuPreintegratedFrame);
+        }
+
+        if(pCurrentMap->isImuInitialized())
+        {
+            if(bOK)
+            {
+                if(mCurrentFrame.mnId==(mnLastRelocFrameId+mnFramesToResetIMU))
+                {
+                    cout << "RESETING FRAME!!!" << endl;
+                    ResetFrameIMU();
+                }
+                else if(mCurrentFrame.mnId>(mnLastRelocFrameId+30))
+                    mLastBias = mCurrentFrame.mImuBias;
+            }
+        }
+
+#ifdef REGISTER_TIMES
+        std::chrono::steady_clock::time_point time_EndLMTrack = std::chrono::steady_clock::now();
+
+        double timeLMTrack = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndLMTrack - time_StartLMTrack).count();
+        vdLMTrack_ms.push_back(timeLMTrack);
+#endif
+
+        // Update drawer
+        mpFrameDrawer->Update(this);
+        if(mCurrentFrame.isSet())
+            mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.GetPose());
+
+        if(bOK || mState==RECENTLY_LOST)
+        {
+            // Update motion model
+            if(mLastFrame.isSet() && mCurrentFrame.isSet())
+            {
+                Sophus::SE3f LastTwc = mLastFrame.GetPose().inverse();
+                mVelocity = mCurrentFrame.GetPose() * LastTwc;
+                mbVelocity = true;
+            }
+            else {
+                mbVelocity = false;
+            }
+
+            if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+                mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.GetPose());
 
             // Clean VO matches
             for(int i=0; i<mCurrentFrame.N; i++)
@@ -1291,16 +2238,28 @@ void Tracking::Track()
             }
             mlpTemporalPoints.clear();
 
+#ifdef REGISTER_TIMES
+            std::chrono::steady_clock::time_point time_StartNewKF = std::chrono::steady_clock::now();
+#endif
+            bool bNeedKF = NeedNewKeyFrame();
+
             // Check if we need to insert a new keyframe
-            if(NeedNewKeyFrame()) {
+            // if(bNeedKF && bOK)
+            if(bNeedKF && (bOK || (mInsertKFsLost && mState==RECENTLY_LOST &&
+                                   (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))))
                 CreateNewKeyFrame();
-                createdNewKeyFrame_ = true;
-            }
+
+#ifdef REGISTER_TIMES
+            std::chrono::steady_clock::time_point time_EndNewKF = std::chrono::steady_clock::now();
+
+            double timeNewKF = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndNewKF - time_StartNewKF).count();
+            vdNewKF_ms.push_back(timeNewKF);
+#endif
 
             // We allow points with high innovation (considererd outliers by the Huber Function)
             // pass to the new keyframe, so that bundle adjustment will finally decide
             // if they are outliers or not. We don't want next frame to estimate its position
-            // with those points so we discard them in the frame.
+            // with those points so we discard them in the frame. Only has effect if lastframe is tracked
             for(int i=0; i<mCurrentFrame.N;i++)
             {
                 if(mCurrentFrame.mvpMapPoints[i] && mCurrentFrame.mvbOutlier[i])
@@ -1311,12 +2270,22 @@ void Tracking::Track()
         // Reset if the camera get lost soon after initialization
         if(mState==LOST)
         {
-            if(mpMap->KeyFramesInMap()<=5)
+            if(pCurrentMap->KeyFramesInMap()<=10)
             {
-                cout << "Track lost soon after initialisation, reseting..." << endl;
-                mpSystem->Reset();
+                mpSystem->ResetActiveMap();
                 return;
             }
+            if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+                if (!pCurrentMap->isImuInitialized())
+                {
+                    Verbose::PrintMess("Track lost before IMU initialisation, reseting...", Verbose::VERBOSITY_QUIET);
+                    mpSystem->ResetActiveMap();
+                    return;
+                }
+
+            CreateMapInAtlas();
+
+            return;
         }
 
         if(!mCurrentFrame.mpReferenceKF)
@@ -1325,24 +2294,41 @@ void Tracking::Track()
         mLastFrame = Frame(mCurrentFrame);
     }
 
-    // Store frame pose information to retrieve the complete camera trajectory afterwards.
-    if(!mCurrentFrame.mTcw.empty() && mCurrentFrame.mpReferenceKF)
+
+
+
+    if(mState==OK || mState==RECENTLY_LOST)
     {
-        cv::Mat Tcr = mCurrentFrame.mTcw*mCurrentFrame.mpReferenceKF->GetPoseInverse();
-        mlRelativeFramePoses.push_back(Tcr);
-        mlpReferences.push_back(mpReferenceKF);
-        mlFrameTimes.push_back(mCurrentFrame.mTimeStamp);
-        mlbLost.push_back(mState==LOST);
-    }
-    else
-    {
-        // This can happen if tracking is lost
-        mlRelativeFramePoses.push_back(mlRelativeFramePoses.back());
-        mlpReferences.push_back(mlpReferences.back());
-        mlFrameTimes.push_back(mlFrameTimes.back());
-        mlbLost.push_back(mState==LOST);
+        // Store frame pose information to retrieve the complete camera trajectory afterwards.
+        if(mCurrentFrame.isSet())
+        {
+            Sophus::SE3f Tcr_ = mCurrentFrame.GetPose() * mCurrentFrame.mpReferenceKF->GetPoseInverse();
+            mlRelativeFramePoses.push_back(Tcr_);
+            mlpReferences.push_back(mCurrentFrame.mpReferenceKF);
+            mlFrameTimes.push_back(mCurrentFrame.mTimeStamp);
+            mlbLost.push_back(mState==LOST);
+        }
+        else
+        {
+            // This can happen if tracking is lost
+            mlRelativeFramePoses.push_back(mlRelativeFramePoses.back());
+            mlpReferences.push_back(mlpReferences.back());
+            mlFrameTimes.push_back(mlFrameTimes.back());
+            mlbLost.push_back(mState==LOST);
+        }
+
     }
 
+#ifdef REGISTER_LOOP
+    if (Stop()) {
+
+        // Safe area to stop
+        while(isStopped())
+        {
+            usleep(3000);
+        }
+    }
+#endif
 }
 
 
@@ -1350,88 +2336,154 @@ void Tracking::StereoInitialization()
 {
     if(mCurrentFrame.N>500)
     {
-        // Set Frame pose to the origin
-        mCurrentFrame.SetPose(cv::Mat::eye(4,4,CV_32F));
+        if (mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+        {
+            if (!mCurrentFrame.mpImuPreintegrated || !mLastFrame.mpImuPreintegrated)
+            {
+                cout << "not IMU meas" << endl;
+                return;
+            }
+
+            if (!mFastInit && (mCurrentFrame.mpImuPreintegratedFrame->avgA-mLastFrame.mpImuPreintegratedFrame->avgA).norm()<0.5)
+            {
+                cout << "not enough acceleration" << endl;
+                return;
+            }
+
+            if(mpImuPreintegratedFromLastKF)
+                delete mpImuPreintegratedFromLastKF;
+
+            mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
+            mCurrentFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
+        }
+
+        // Set Frame pose to the origin (In case of inertial SLAM to imu)
+        if (mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+        {
+            Eigen::Matrix3f Rwb0 = mCurrentFrame.mImuCalib.mTcb.rotationMatrix();
+            Eigen::Vector3f twb0 = mCurrentFrame.mImuCalib.mTcb.translation();
+            Eigen::Vector3f Vwb0;
+            Vwb0.setZero();
+            mCurrentFrame.SetImuPoseVelocity(Rwb0, twb0, Vwb0);
+        }
+        else
+            mCurrentFrame.SetPose(Sophus::SE3f());
 
         // Create KeyFrame
-        KeyFrame* pKFini = new KeyFrame(mCurrentFrame,mpMap,mpKeyFrameDB);
+        KeyFrame* pKFini = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
 
         // Insert KeyFrame in the map
-        mpMap->AddKeyFrame(pKFini);
+        mpAtlas->AddKeyFrame(pKFini);
 
         // Create MapPoints and asscoiate to KeyFrame
-        for(int i=0; i<mCurrentFrame.N;i++)
-        {
-            float z = mCurrentFrame.mvDepth[i];
-            if(z>0)
+        if(!mpCamera2){
+            for(int i=0; i<mCurrentFrame.N;i++)
             {
-                cv::Mat x3D = mCurrentFrame.UnprojectStereo(i);
-                MapPoint* pNewMP = new MapPoint(x3D,pKFini,mpMap);
-                pNewMP->AddObservation(pKFini,i);
-                pKFini->AddMapPoint(pNewMP,i);
-                pNewMP->ComputeDistinctiveDescriptors();
-                pNewMP->UpdateNormalAndDepth();
-                mpMap->AddMapPoint(pNewMP);
+                float z = mCurrentFrame.mvDepth[i];
+                if(z>0)
+                {
+                    Eigen::Vector3f x3D;
+                    mCurrentFrame.UnprojectStereo(i, x3D);
+                    MapPoint* pNewMP = new MapPoint(x3D, pKFini, mpAtlas->GetCurrentMap());
+                    pNewMP->AddObservation(pKFini,i);
+                    pKFini->AddMapPoint(pNewMP,i);
+                    pNewMP->ComputeDistinctiveDescriptors();
+                    pNewMP->UpdateNormalAndDepth();
+                    mpAtlas->AddMapPoint(pNewMP);
 
-                mCurrentFrame.mvpMapPoints[i]=pNewMP;
+                    mCurrentFrame.mvpMapPoints[i]=pNewMP;
+                }
+            }
+        } else{
+            for(int i = 0; i < mCurrentFrame.Nleft; i++){
+                int rightIndex = mCurrentFrame.mvLeftToRightMatch[i];
+                if(rightIndex != -1){
+                    Eigen::Vector3f x3D = mCurrentFrame.mvStereo3Dpoints[i];
+
+                    MapPoint* pNewMP = new MapPoint(x3D, pKFini, mpAtlas->GetCurrentMap());
+
+                    pNewMP->AddObservation(pKFini,i);
+                    pNewMP->AddObservation(pKFini,rightIndex + mCurrentFrame.Nleft);
+
+                    pKFini->AddMapPoint(pNewMP,i);
+                    pKFini->AddMapPoint(pNewMP,rightIndex + mCurrentFrame.Nleft);
+
+                    pNewMP->ComputeDistinctiveDescriptors();
+                    pNewMP->UpdateNormalAndDepth();
+                    mpAtlas->AddMapPoint(pNewMP);
+
+                    mCurrentFrame.mvpMapPoints[i]=pNewMP;
+                    mCurrentFrame.mvpMapPoints[rightIndex + mCurrentFrame.Nleft]=pNewMP;
+                }
             }
         }
 
-        cout << "New map created with " << mpMap->MapPointsInMap() << " points" << endl;
+        Verbose::PrintMess("New Map created with " + to_string(mpAtlas->MapPointsInMap()) + " points", Verbose::VERBOSITY_QUIET);
+
+        //cout << "Active map: " << mpAtlas->GetCurrentMap()->GetId() << endl;
 
         mpLocalMapper->InsertKeyFrame(pKFini);
 
         mLastFrame = Frame(mCurrentFrame);
-        mnLastKeyFrameId=mCurrentFrame.mnId;
+        mnLastKeyFrameId = mCurrentFrame.mnId;
         mpLastKeyFrame = pKFini;
+        //mnLastRelocFrameId = mCurrentFrame.mnId;
 
         mvpLocalKeyFrames.push_back(pKFini);
-        mvpLocalMapPoints=mpMap->GetAllMapPoints();
+        mvpLocalMapPoints=mpAtlas->GetAllMapPoints();
         mpReferenceKF = pKFini;
         mCurrentFrame.mpReferenceKF = pKFini;
 
-        mpMap->SetReferenceMapPoints(mvpLocalMapPoints);
+        mpAtlas->SetReferenceMapPoints(mvpLocalMapPoints);
 
-        mpMap->mvpKeyFrameOrigins.push_back(pKFini);
+        mpAtlas->GetCurrentMap()->mvpKeyFrameOrigins.push_back(pKFini);
 
-        mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.mTcw);
+        mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.GetPose());
 
         mState=OK;
     }
 }
 
+
 void Tracking::MonocularInitialization()
 {
 
-    if(!mpInitializer)
+    if(!mbReadyToInitializate)
     {
         // Set Reference Frame
         if(mCurrentFrame.mvKeys.size()>100)
         {
+
             mInitialFrame = Frame(mCurrentFrame);
             mLastFrame = Frame(mCurrentFrame);
             mvbPrevMatched.resize(mCurrentFrame.mvKeysUn.size());
             for(size_t i=0; i<mCurrentFrame.mvKeysUn.size(); i++)
                 mvbPrevMatched[i]=mCurrentFrame.mvKeysUn[i].pt;
 
-            if(mpInitializer)
-                delete mpInitializer;
-
-            mpInitializer =  new Initializer(mCurrentFrame,1.0,200);
-
             fill(mvIniMatches.begin(),mvIniMatches.end(),-1);
+
+            if (mSensor == System::IMU_MONOCULAR)
+            {
+                if(mpImuPreintegratedFromLastKF)
+                {
+                    delete mpImuPreintegratedFromLastKF;
+                }
+                mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
+                mCurrentFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
+
+            }
+
+            mbReadyToInitializate = true;
 
             return;
         }
     }
     else
     {
-        // Try to initialize
-        if((int)mCurrentFrame.mvKeys.size()<=100)
+        if (((int)mCurrentFrame.mvKeys.size()<=100)||((mSensor == System::IMU_MONOCULAR)&&(mLastFrame.mTimeStamp-mInitialFrame.mTimeStamp>1.0)))
         {
-            delete mpInitializer;
-            mpInitializer = static_cast<Initializer*>(NULL);
-            fill(mvIniMatches.begin(),mvIniMatches.end(),-1);
+            mbReadyToInitializate = false;
+
             return;
         }
 
@@ -1442,16 +2494,14 @@ void Tracking::MonocularInitialization()
         // Check if there are enough correspondences
         if(nmatches<100)
         {
-            delete mpInitializer;
-            mpInitializer = static_cast<Initializer*>(NULL);
+            mbReadyToInitializate = false;
             return;
         }
 
-        cv::Mat Rcw; // Current Camera Rotation
-        cv::Mat tcw; // Current Camera Translation
+        Sophus::SE3f Tcw;
         vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
 
-        if(mpInitializer->Initialize(mCurrentFrame, mvIniMatches, Rcw, tcw, mvIniP3D, vbTriangulated))
+        if(mpCamera->ReconstructWithTwoViews(mInitialFrame.mvKeysUn,mCurrentFrame.mvKeysUn,mvIniMatches,Tcw,mvIniP3D,vbTriangulated))
         {
             for(size_t i=0, iend=mvIniMatches.size(); i<iend;i++)
             {
@@ -1463,10 +2513,7 @@ void Tracking::MonocularInitialization()
             }
 
             // Set Frame Poses
-            mInitialFrame.SetPose(cv::Mat::eye(4,4,CV_32F));
-            cv::Mat Tcw = cv::Mat::eye(4,4,CV_32F);
-            Rcw.copyTo(Tcw.rowRange(0,3).colRange(0,3));
-            tcw.copyTo(Tcw.rowRange(0,3).col(3));
+            mInitialFrame.SetPose(Sophus::SE3f());
             mCurrentFrame.SetPose(Tcw);
 
             CreateInitialMapMonocular();
@@ -1474,30 +2521,34 @@ void Tracking::MonocularInitialization()
     }
 }
 
+
+
 void Tracking::CreateInitialMapMonocular()
 {
     // Create KeyFrames
-    KeyFrame* pKFini = new KeyFrame(mInitialFrame,mpMap,mpKeyFrameDB);
-    KeyFrame* pKFcur = new KeyFrame(mCurrentFrame,mpMap,mpKeyFrameDB);
+    KeyFrame* pKFini = new KeyFrame(mInitialFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
+    KeyFrame* pKFcur = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
+
+    if(mSensor == System::IMU_MONOCULAR)
+        pKFini->mpImuPreintegrated = (IMU::Preintegrated*)(NULL);
 
 
     pKFini->ComputeBoW();
     pKFcur->ComputeBoW();
 
     // Insert KFs in the map
-    mpMap->AddKeyFrame(pKFini);
-    mpMap->AddKeyFrame(pKFcur);
+    mpAtlas->AddKeyFrame(pKFini);
+    mpAtlas->AddKeyFrame(pKFcur);
 
-    // Create MapPoints and asscoiate to keyframes
     for(size_t i=0; i<mvIniMatches.size();i++)
     {
         if(mvIniMatches[i]<0)
             continue;
 
         //Create MapPoint.
-        cv::Mat worldPos(mvIniP3D[i]);
-
-        MapPoint* pMP = new MapPoint(worldPos,pKFcur,mpMap);
+        Eigen::Vector3f worldPos;
+        worldPos << mvIniP3D[i].x, mvIniP3D[i].y, mvIniP3D[i].z;
+        MapPoint* pMP = new MapPoint(worldPos,pKFcur,mpAtlas->GetCurrentMap());
 
         pKFini->AddMapPoint(pMP,i);
         pKFcur->AddMapPoint(pMP,mvIniMatches[i]);
@@ -1513,32 +2564,38 @@ void Tracking::CreateInitialMapMonocular()
         mCurrentFrame.mvbOutlier[mvIniMatches[i]] = false;
 
         //Add to Map
-        mpMap->AddMapPoint(pMP);
+        mpAtlas->AddMapPoint(pMP);
     }
+
 
     // Update Connections
     pKFini->UpdateConnections();
     pKFcur->UpdateConnections();
 
+    std::set<MapPoint*> sMPs;
+    sMPs = pKFini->GetMapPoints();
+
     // Bundle Adjustment
-    cout << "New Map created with " << mpMap->MapPointsInMap() << " points" << endl;
+    Verbose::PrintMess("New Map created with " + to_string(mpAtlas->MapPointsInMap()) + " points", Verbose::VERBOSITY_QUIET);
+    Optimizer::GlobalBundleAdjustemnt(mpAtlas->GetCurrentMap(),20);
 
-    Optimizer::GlobalBundleAdjustemnt(mpMap,20);
-
-    // Set median depth to 1
     float medianDepth = pKFini->ComputeSceneMedianDepth(2);
-    float invMedianDepth = 1.0f/medianDepth;
+    float invMedianDepth;
+    if(mSensor == System::IMU_MONOCULAR)
+        invMedianDepth = 4.0f/medianDepth; // 4.0f
+    else
+        invMedianDepth = 1.0f/medianDepth;
 
-    if(medianDepth<0 || pKFcur->TrackedMapPoints(1)<100)
+    if(medianDepth<0 || pKFcur->TrackedMapPoints(1)<50) // TODO Check, originally 100 tracks
     {
-        cout << "Wrong initialization, reseting..." << endl;
-        Reset();
+        Verbose::PrintMess("Wrong initialization, reseting...", Verbose::VERBOSITY_QUIET);
+        mpSystem->ResetActiveMap();
         return;
     }
 
     // Scale initial baseline
-    cv::Mat Tc2w = pKFcur->GetPose();
-    Tc2w.col(3).rowRange(0,3) = Tc2w.col(3).rowRange(0,3)*invMedianDepth;
+    Sophus::SE3f Tc2w = pKFcur->GetPose();
+    Tc2w.translation() *= invMedianDepth;
     pKFcur->SetPose(Tc2w);
 
     // Scale points
@@ -1549,31 +2606,97 @@ void Tracking::CreateInitialMapMonocular()
         {
             MapPoint* pMP = vpAllMapPoints[iMP];
             pMP->SetWorldPos(pMP->GetWorldPos()*invMedianDepth);
+            pMP->UpdateNormalAndDepth();
         }
     }
 
+    if (mSensor == System::IMU_MONOCULAR)
+    {
+        pKFcur->mPrevKF = pKFini;
+        pKFini->mNextKF = pKFcur;
+        pKFcur->mpImuPreintegrated = mpImuPreintegratedFromLastKF;
+
+        mpImuPreintegratedFromLastKF = new IMU::Preintegrated(pKFcur->mpImuPreintegrated->GetUpdatedBias(),pKFcur->mImuCalib);
+    }
+
+
     mpLocalMapper->InsertKeyFrame(pKFini);
     mpLocalMapper->InsertKeyFrame(pKFcur);
+    mpLocalMapper->mFirstTs=pKFcur->mTimeStamp;
 
     mCurrentFrame.SetPose(pKFcur->GetPose());
     mnLastKeyFrameId=mCurrentFrame.mnId;
     mpLastKeyFrame = pKFcur;
+    //mnLastRelocFrameId = mInitialFrame.mnId;
 
     mvpLocalKeyFrames.push_back(pKFcur);
     mvpLocalKeyFrames.push_back(pKFini);
-    mvpLocalMapPoints=mpMap->GetAllMapPoints();
+    mvpLocalMapPoints=mpAtlas->GetAllMapPoints();
     mpReferenceKF = pKFcur;
     mCurrentFrame.mpReferenceKF = pKFcur;
 
+    // Compute here initial velocity
+    vector<KeyFrame*> vKFs = mpAtlas->GetAllKeyFrames();
+
+    Sophus::SE3f deltaT = vKFs.back()->GetPose() * vKFs.front()->GetPoseInverse();
+    mbVelocity = false;
+    Eigen::Vector3f phi = deltaT.so3().log();
+
+    double aux = (mCurrentFrame.mTimeStamp-mLastFrame.mTimeStamp)/(mCurrentFrame.mTimeStamp-mInitialFrame.mTimeStamp);
+    phi *= aux;
+
     mLastFrame = Frame(mCurrentFrame);
 
-    mpMap->SetReferenceMapPoints(mvpLocalMapPoints);
+    mpAtlas->SetReferenceMapPoints(mvpLocalMapPoints);
 
     mpMapDrawer->SetCurrentCameraPose(pKFcur->GetPose());
 
-    mpMap->mvpKeyFrameOrigins.push_back(pKFini);
+    mpAtlas->GetCurrentMap()->mvpKeyFrameOrigins.push_back(pKFini);
 
     mState=OK;
+
+    initID = pKFcur->mnId;
+}
+
+
+void Tracking::CreateMapInAtlas()
+{
+    mnLastInitFrameId = mCurrentFrame.mnId;
+    mpAtlas->CreateNewMap();
+    if (mSensor==System::IMU_STEREO || mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_RGBD)
+        mpAtlas->SetInertialSensor();
+    mbSetInit=false;
+
+    mnInitialFrameId = mCurrentFrame.mnId+1;
+    mState = NO_IMAGES_YET;
+
+    // Restart the variable with information about the last KF
+    mbVelocity = false;
+    //mnLastRelocFrameId = mnLastInitFrameId; // The last relocation KF_id is the current id, because it is the new starting point for new map
+    Verbose::PrintMess("First frame id in map: " + to_string(mnLastInitFrameId+1), Verbose::VERBOSITY_NORMAL);
+    mbVO = false; // Init value for know if there are enough MapPoints in the last KF
+    if(mSensor == System::MONOCULAR || mSensor == System::IMU_MONOCULAR)
+    {
+        mbReadyToInitializate = false;
+    }
+
+    if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && mpImuPreintegratedFromLastKF)
+    {
+        delete mpImuPreintegratedFromLastKF;
+        mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
+    }
+
+    if(mpLastKeyFrame)
+        mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+
+    if(mpReferenceKF)
+        mpReferenceKF = static_cast<KeyFrame*>(NULL);
+
+    mLastFrame = Frame();
+    mCurrentFrame = Frame();
+    mvIniMatches.clear();
+
+    mbCreatedMap = true;
 }
 
 void Tracking::CheckReplacedInLastFrame()
@@ -1607,17 +2730,25 @@ bool Tracking::TrackReferenceKeyFrame()
     int nmatches = matcher.SearchByBoW(mpReferenceKF,mCurrentFrame,vpMapPointMatches);
 
     if(nmatches<15)
+    {
+        cout << "TRACK_REF_KF: Less than 15 matches!!\n";
         return false;
+    }
 
     mCurrentFrame.mvpMapPoints = vpMapPointMatches;
-    mCurrentFrame.SetPose(mLastFrame.mTcw);
+    mCurrentFrame.SetPose(mLastFrame.GetPose());
 
+    //mCurrentFrame.PrintPointDistribution();
+
+
+    // cout << " TrackReferenceKeyFrame mLastFrame.mTcw:  " << mLastFrame.mTcw << endl;
     Optimizer::PoseOptimization(&mCurrentFrame);
 
     // Discard outliers
     int nmatchesMap = 0;
     for(int i =0; i<mCurrentFrame.N; i++)
     {
+        //if(i >= mCurrentFrame.Nleft) break;
         if(mCurrentFrame.mvpMapPoints[i])
         {
             if(mCurrentFrame.mvbOutlier[i])
@@ -1626,6 +2757,12 @@ bool Tracking::TrackReferenceKeyFrame()
 
                 mCurrentFrame.mvpMapPoints[i]=static_cast<MapPoint*>(NULL);
                 mCurrentFrame.mvbOutlier[i]=false;
+                if(i < mCurrentFrame.Nleft){
+                    pMP->mbTrackInView = false;
+                }
+                else{
+                    pMP->mbTrackInViewR = false;
+                }
                 pMP->mbTrackInView = false;
                 pMP->mnLastFrameSeen = mCurrentFrame.mnId;
                 nmatches--;
@@ -1635,25 +2772,28 @@ bool Tracking::TrackReferenceKeyFrame()
         }
     }
 
-    return nmatchesMap>=10;
+    if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+        return true;
+    else
+        return nmatchesMap>=10;
 }
 
 void Tracking::UpdateLastFrame()
 {
     // Update pose according to reference keyframe
     KeyFrame* pRef = mLastFrame.mpReferenceKF;
-    cv::Mat Tlr = mlRelativeFramePoses.back();
+    Sophus::SE3f Tlr = mlRelativeFramePoses.back();
+    mLastFrame.SetPose(Tlr * pRef->GetPose());
 
-    mLastFrame.SetPose(Tlr*pRef->GetPose());
-
-    if(mnLastKeyFrameId==mLastFrame.mnId || mSensor==System::MONOCULAR || !mbOnlyTracking)
+    if(mnLastKeyFrameId==mLastFrame.mnId || mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR || !mbOnlyTracking)
         return;
 
     // Create "visual odometry" MapPoints
     // We sort points according to their measured depth by the stereo/RGB-D sensor
     vector<pair<float,int> > vDepthIdx;
-    vDepthIdx.reserve(mLastFrame.N);
-    for(int i=0; i<mLastFrame.N;i++)
+    const int Nfeat = mLastFrame.Nleft == -1? mLastFrame.N : mLastFrame.Nleft;
+    vDepthIdx.reserve(Nfeat);
+    for(int i=0; i<Nfeat;i++)
     {
         float z = mLastFrame.mvDepth[i];
         if(z>0)
@@ -1677,18 +2817,24 @@ void Tracking::UpdateLastFrame()
         bool bCreateNew = false;
 
         MapPoint* pMP = mLastFrame.mvpMapPoints[i];
+
         if(!pMP)
             bCreateNew = true;
         else if(pMP->Observations()<1)
-        {
             bCreateNew = true;
-        }
 
         if(bCreateNew)
         {
-            cv::Mat x3D = mLastFrame.UnprojectStereo(i);
-            MapPoint* pNewMP = new MapPoint(x3D,mpMap,&mLastFrame,i);
+            Eigen::Vector3f x3D;
 
+            if(mLastFrame.Nleft == -1){
+                mLastFrame.UnprojectStereo(i, x3D);
+            }
+            else{
+                x3D = mLastFrame.UnprojectStereoFishEye(i);
+            }
+
+            MapPoint* pNewMP = new MapPoint(x3D,mpAtlas->GetCurrentMap(),&mLastFrame,i);
             mLastFrame.mvpMapPoints[i]=pNewMP;
 
             mlpTemporalPoints.push_back(pNewMP);
@@ -1701,6 +2847,7 @@ void Tracking::UpdateLastFrame()
 
         if(vDepthIdx[j].first>mThDepth && nPoints>100)
             break;
+
     }
 }
 
@@ -1712,27 +2859,51 @@ bool Tracking::TrackWithMotionModel()
     // Create "visual odometry" points if in Localization Mode
     UpdateLastFrame();
 
-    mCurrentFrame.SetPose(mVelocity*mLastFrame.mTcw);
+    if (mpAtlas->isImuInitialized() && (mCurrentFrame.mnId>mnLastRelocFrameId+mnFramesToResetIMU))
+    {
+        // Predict state with IMU if it is initialized and it doesnt need reset
+        PredictStateIMU();
+        return true;
+    }
+    else
+    {
+        mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
+    }
+
+
+
 
     fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
 
     // Project points seen in previous frame
     int th;
-    if(mSensor!=System::STEREO)
-        th=15;
-    else
+
+    if(mSensor==System::STEREO)
         th=7;
-    int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,th,mSensor==System::MONOCULAR);
+    else
+        th=15;
+
+    int nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
 
     // If few matches, uses a wider window search
     if(nmatches<20)
     {
+        Verbose::PrintMess("Not enough matches, wider window search!!", Verbose::VERBOSITY_NORMAL);
         fill(mCurrentFrame.mvpMapPoints.begin(),mCurrentFrame.mvpMapPoints.end(),static_cast<MapPoint*>(NULL));
-        nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,mSensor==System::MONOCULAR);
+
+        nmatches = matcher.SearchByProjection(mCurrentFrame,mLastFrame,2*th,mSensor==System::MONOCULAR || mSensor==System::IMU_MONOCULAR);
+        Verbose::PrintMess("Matches with wider search: " + to_string(nmatches), Verbose::VERBOSITY_NORMAL);
+
     }
 
     if(nmatches<20)
-        return false;
+    {
+        Verbose::PrintMess("Not enough matches!!", Verbose::VERBOSITY_NORMAL);
+        if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+            return true;
+        else
+            return false;
+    }
 
     // Optimize frame pose with all matches
     Optimizer::PoseOptimization(&mCurrentFrame);
@@ -1749,14 +2920,19 @@ bool Tracking::TrackWithMotionModel()
 
                 mCurrentFrame.mvpMapPoints[i]=static_cast<MapPoint*>(NULL);
                 mCurrentFrame.mvbOutlier[i]=false;
-                pMP->mbTrackInView = false;
+                if(i < mCurrentFrame.Nleft){
+                    pMP->mbTrackInView = false;
+                }
+                else{
+                    pMP->mbTrackInViewR = false;
+                }
                 pMP->mnLastFrameSeen = mCurrentFrame.mnId;
                 nmatches--;
             }
             else if(mCurrentFrame.mvpMapPoints[i]->Observations()>0)
                 nmatchesMap++;
         }
-    }    
+    }
 
     if(mbOnlyTracking)
     {
@@ -1764,20 +2940,67 @@ bool Tracking::TrackWithMotionModel()
         return nmatches>20;
     }
 
-    return nmatchesMap>=10;
+    if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+        return true;
+    else
+        return nmatchesMap>=10;
 }
 
 bool Tracking::TrackLocalMap()
 {
+
     // We have an estimation of the camera pose and some map points tracked in the frame.
     // We retrieve the local map and try to find matches to points in the local map.
+    mTrackedFr++;
 
     UpdateLocalMap();
-
     SearchLocalPoints();
 
-    // Optimize Pose
-    Optimizer::PoseOptimization(&mCurrentFrame);
+    // TOO check outliers before PO
+    int aux1 = 0, aux2=0;
+    for(int i=0; i<mCurrentFrame.N; i++)
+        if( mCurrentFrame.mvpMapPoints[i])
+        {
+            aux1++;
+            if(mCurrentFrame.mvbOutlier[i])
+                aux2++;
+        }
+
+    int inliers;
+    if (!mpAtlas->isImuInitialized())
+        Optimizer::PoseOptimization(&mCurrentFrame);
+    else
+    {
+        if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
+        {
+            Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
+            Optimizer::PoseOptimization(&mCurrentFrame);
+        }
+        else
+        {
+            // if(!mbMapUpdated && mState == OK) //  && (mnMatchesInliers>30))
+            if(!mbMapUpdated) //  && (mnMatchesInliers>30))
+            {
+                Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
+                inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+            }
+            else
+            {
+                Verbose::PrintMess("TLM: PoseInertialOptimizationLastKeyFrame ", Verbose::VERBOSITY_DEBUG);
+                inliers = Optimizer::PoseInertialOptimizationLastKeyFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
+            }
+        }
+    }
+
+    aux1 = 0, aux2 = 0;
+    for(int i=0; i<mCurrentFrame.N; i++)
+        if( mCurrentFrame.mvpMapPoints[i])
+        {
+            aux1++;
+            if(mCurrentFrame.mvbOutlier[i])
+                aux2++;
+        }
+
     mnMatchesInliers = 0;
 
     // Update MapPoints Statistics
@@ -1798,36 +3021,77 @@ bool Tracking::TrackLocalMap()
             }
             else if(mSensor==System::STEREO)
                 mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
-
         }
     }
 
     // Decide if the tracking was succesful
     // More restrictive if there was a relocalization recently
+    mpLocalMapper->mnMatchesInliers=mnMatchesInliers;
     if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && mnMatchesInliers<50)
         return false;
 
-    if(mnMatchesInliers<30)
-        return false;
-    else
+    if((mnMatchesInliers>10)&&(mState==RECENTLY_LOST))
         return true;
-}
 
+
+    if (mSensor == System::IMU_MONOCULAR)
+    {
+        if((mnMatchesInliers<15 && mpAtlas->isImuInitialized())||(mnMatchesInliers<50 && !mpAtlas->isImuInitialized()))
+        {
+            return false;
+        }
+        else
+            return true;
+    }
+    else if (mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+    {
+        if(mnMatchesInliers<15)
+        {
+            return false;
+        }
+        else
+            return true;
+    }
+    else
+    {
+        if(mnMatchesInliers<30)
+            return false;
+        else
+            return true;
+    }
+}
 
 bool Tracking::NeedNewKeyFrame()
 {
+    if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mpAtlas->GetCurrentMap()->isImuInitialized())
+    {
+        if (mSensor == System::IMU_MONOCULAR && (mCurrentFrame.mTimeStamp-mpLastKeyFrame->mTimeStamp)>=0.25)
+            return true;
+        else if ((mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && (mCurrentFrame.mTimeStamp-mpLastKeyFrame->mTimeStamp)>=0.25)
+            return true;
+        else
+            return false;
+    }
+
     if(mbOnlyTracking)
         return false;
 
     // If Local Mapping is freezed by a Loop Closure do not insert keyframes
-    if(mpLocalMapper->isStopped() || mpLocalMapper->stopRequested())
+    if(mpLocalMapper->isStopped() || mpLocalMapper->stopRequested()) {
+        /*if(mSensor == System::MONOCULAR)
+        {
+            std::cout << "NeedNewKeyFrame: localmap stopped" << std::endl;
+        }*/
         return false;
+    }
 
-    const int nKFs = mpMap->KeyFramesInMap();
+    const int nKFs = mpAtlas->KeyFramesInMap();
 
     // Do not insert keyframes if not enough frames have passed from last relocalisation
     if(mCurrentFrame.mnId<mnLastRelocFrameId+mMaxFrames && nKFs>mMaxFrames)
+    {
         return false;
+    }
 
     // Tracked MapPoints in the reference keyframe
     int nMinObs = 3;
@@ -1841,9 +3105,11 @@ bool Tracking::NeedNewKeyFrame()
     // Check how many "close" points are being tracked and how many could be potentially created.
     int nNonTrackedClose = 0;
     int nTrackedClose= 0;
-    if(mSensor!=System::MONOCULAR)
+
+    if(mSensor!=System::MONOCULAR && mSensor!=System::IMU_MONOCULAR)
     {
-        for(int i =0; i<mCurrentFrame.N; i++)
+        int N = (mCurrentFrame.Nleft == -1) ? mCurrentFrame.N : mCurrentFrame.Nleft;
+        for(int i =0; i<N; i++)
         {
             if(mCurrentFrame.mvDepth[i]>0 && mCurrentFrame.mvDepth[i]<mThDepth)
             {
@@ -1851,41 +3117,85 @@ bool Tracking::NeedNewKeyFrame()
                     nTrackedClose++;
                 else
                     nNonTrackedClose++;
+
             }
         }
+        //Verbose::PrintMess("[NEEDNEWKF]-> closed points: " + to_string(nTrackedClose) + "; non tracked closed points: " + to_string(nNonTrackedClose), Verbose::VERBOSITY_NORMAL);// Verbose::VERBOSITY_DEBUG);
     }
 
-    bool bNeedToInsertClose = (nTrackedClose<100) && (nNonTrackedClose>70);
+    bool bNeedToInsertClose;
+    bNeedToInsertClose = (nTrackedClose<100) && (nNonTrackedClose>70);
 
     // Thresholds
     float thRefRatio = 0.75f;
     if(nKFs<2)
         thRefRatio = 0.4f;
 
+    /*int nClosedPoints = nTrackedClose + nNonTrackedClose;
+    const int thStereoClosedPoints = 15;
+    if(nClosedPoints < thStereoClosedPoints && (mSensor==System::STEREO || mSensor==System::IMU_STEREO))
+    {
+        //Pseudo-monocular, there are not enough close points to be confident about the stereo observations.
+        thRefRatio = 0.9f;
+    }*/
+
     if(mSensor==System::MONOCULAR)
         thRefRatio = 0.9f;
+
+    if(mpCamera2) thRefRatio = 0.75f;
+
+    if(mSensor==System::IMU_MONOCULAR)
+    {
+        if(mnMatchesInliers>350) // Points tracked from the local map
+            thRefRatio = 0.75f;
+        else
+            thRefRatio = 0.90f;
+    }
 
     // Condition 1a: More than "MaxFrames" have passed from last keyframe insertion
     const bool c1a = mCurrentFrame.mnId>=mnLastKeyFrameId+mMaxFrames;
     // Condition 1b: More than "MinFrames" have passed and Local Mapping is idle
-    const bool c1b = (mCurrentFrame.mnId>=mnLastKeyFrameId+mMinFrames && bLocalMappingIdle);
+    const bool c1b = ((mCurrentFrame.mnId>=mnLastKeyFrameId+mMinFrames) && bLocalMappingIdle); //mpLocalMapper->KeyframesInQueue() < 2);
     //Condition 1c: tracking is weak
-    const bool c1c =  mSensor!=System::MONOCULAR && (mnMatchesInliers<nRefMatches*0.25 || bNeedToInsertClose) ;
+    const bool c1c = mSensor!=System::MONOCULAR && mSensor!=System::IMU_MONOCULAR && mSensor!=System::IMU_STEREO && mSensor!=System::IMU_RGBD && (mnMatchesInliers<nRefMatches*0.25 || bNeedToInsertClose) ;
     // Condition 2: Few tracked points compared to reference keyframe. Lots of visual odometry compared to map matches.
-    const bool c2 = ((mnMatchesInliers<nRefMatches*thRefRatio|| bNeedToInsertClose) && mnMatchesInliers>15);
+    const bool c2 = (((mnMatchesInliers<nRefMatches*thRefRatio || bNeedToInsertClose)) && mnMatchesInliers>15);
 
-    if((c1a||c1b||c1c)&&c2)
+    //std::cout << "NeedNewKF: c1a=" << c1a << "; c1b=" << c1b << "; c1c=" << c1c << "; c2=" << c2 << std::endl;
+    // Temporal condition for Inertial cases
+    bool c3 = false;
+    if(mpLastKeyFrame)
+    {
+        if (mSensor==System::IMU_MONOCULAR)
+        {
+            if ((mCurrentFrame.mTimeStamp-mpLastKeyFrame->mTimeStamp)>=0.5)
+                c3 = true;
+        }
+        else if (mSensor==System::IMU_STEREO || mSensor == System::IMU_RGBD)
+        {
+            if ((mCurrentFrame.mTimeStamp-mpLastKeyFrame->mTimeStamp)>=0.5)
+                c3 = true;
+        }
+    }
+
+    bool c4 = false;
+    if ((((mnMatchesInliers<75) && (mnMatchesInliers>15)) || mState==RECENTLY_LOST) && (mSensor == System::IMU_MONOCULAR)) // MODIFICATION_2, originally ((((mnMatchesInliers<75) && (mnMatchesInliers>15)) || mState==RECENTLY_LOST) && ((mSensor == System::IMU_MONOCULAR)))
+        c4=true;
+    else
+        c4=false;
+
+    if(((c1a||c1b||c1c) && c2)||c3 ||c4)
     {
         // If the mapping accepts keyframes, insert keyframe.
         // Otherwise send a signal to interrupt BA
-        if(bLocalMappingIdle)
+        if(bLocalMappingIdle || mpLocalMapper->IsInitializing())
         {
             return true;
         }
         else
         {
             mpLocalMapper->InterruptBA();
-            if(mSensor!=System::MONOCULAR)
+            if(mSensor!=System::MONOCULAR  && mSensor!=System::IMU_MONOCULAR)
             {
                 if(mpLocalMapper->KeyframesInQueue()<3)
                     return true;
@@ -1893,7 +3203,10 @@ bool Tracking::NeedNewKeyFrame()
                     return false;
             }
             else
+            {
+                //std::cout << "NeedNewKeyFrame: localmap is busy" << std::endl;
                 return false;
+            }
         }
     }
     else
@@ -1902,24 +3215,50 @@ bool Tracking::NeedNewKeyFrame()
 
 void Tracking::CreateNewKeyFrame()
 {
+    if(mpLocalMapper->IsInitializing() && !mpAtlas->isImuInitialized())
+        return;
+
     if(!mpLocalMapper->SetNotStop(true))
         return;
 
-    KeyFrame* pKF = new KeyFrame(mCurrentFrame,mpMap,mpKeyFrameDB);
+    KeyFrame* pKF = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
 
+    if(mpAtlas->isImuInitialized()) //  || mpLocalMapper->IsInitializing())
+        pKF->bImu = true;
+
+    pKF->SetNewBias(mCurrentFrame.mImuBias);
     mpReferenceKF = pKF;
     mCurrentFrame.mpReferenceKF = pKF;
 
-    if(mSensor!=System::MONOCULAR)
+    if(mpLastKeyFrame)
+    {
+        pKF->mPrevKF = mpLastKeyFrame;
+        mpLastKeyFrame->mNextKF = pKF;
+    }
+    else
+        Verbose::PrintMess("No last KF in KF creation!!", Verbose::VERBOSITY_NORMAL);
+
+    // Reset preintegration from last KF (Create new object)
+    if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+    {
+        mpImuPreintegratedFromLastKF = new IMU::Preintegrated(pKF->GetImuBias(),pKF->mImuCalib);
+    }
+
+    if(mSensor!=System::MONOCULAR && mSensor != System::IMU_MONOCULAR) // TODO check if incluide imu_stereo
     {
         mCurrentFrame.UpdatePoseMatrices();
-
+        // cout << "create new MPs" << endl;
         // We sort points by the measured depth by the stereo/RGBD sensor.
         // We create all those MapPoints whose depth < mThDepth.
         // If there are less than 100 close points we create the 100 closest.
+        int maxPoint = 100;
+        if(mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+            maxPoint = 100;
+
         vector<pair<float,int> > vDepthIdx;
+        int N = (mCurrentFrame.Nleft != -1) ? mCurrentFrame.Nleft : mCurrentFrame.N;
         vDepthIdx.reserve(mCurrentFrame.N);
-        for(int i=0; i<mCurrentFrame.N; i++)
+        for(int i=0; i<N; i++)
         {
             float z = mCurrentFrame.mvDepth[i];
             if(z>0)
@@ -1950,13 +3289,30 @@ void Tracking::CreateNewKeyFrame()
 
                 if(bCreateNew)
                 {
-                    cv::Mat x3D = mCurrentFrame.UnprojectStereo(i);
-                    MapPoint* pNewMP = new MapPoint(x3D,pKF,mpMap);
+                    Eigen::Vector3f x3D;
+
+                    if(mCurrentFrame.Nleft == -1){
+                        mCurrentFrame.UnprojectStereo(i, x3D);
+                    }
+                    else{
+                        x3D = mCurrentFrame.UnprojectStereoFishEye(i);
+                    }
+
+                    MapPoint* pNewMP = new MapPoint(x3D,pKF,mpAtlas->GetCurrentMap());
                     pNewMP->AddObservation(pKF,i);
+
+                    //Check if it is a stereo observation in order to not
+                    //duplicate mappoints
+                    if(mCurrentFrame.Nleft != -1 && mCurrentFrame.mvLeftToRightMatch[i] >= 0){
+                        mCurrentFrame.mvpMapPoints[mCurrentFrame.Nleft + mCurrentFrame.mvLeftToRightMatch[i]]=pNewMP;
+                        pNewMP->AddObservation(pKF,mCurrentFrame.Nleft + mCurrentFrame.mvLeftToRightMatch[i]);
+                        pKF->AddMapPoint(pNewMP,mCurrentFrame.Nleft + mCurrentFrame.mvLeftToRightMatch[i]);
+                    }
+
                     pKF->AddMapPoint(pNewMP,i);
                     pNewMP->ComputeDistinctiveDescriptors();
                     pNewMP->UpdateNormalAndDepth();
-                    mpMap->AddMapPoint(pNewMP);
+                    mpAtlas->AddMapPoint(pNewMP);
 
                     mCurrentFrame.mvpMapPoints[i]=pNewMP;
                     nPoints++;
@@ -1966,11 +3322,15 @@ void Tracking::CreateNewKeyFrame()
                     nPoints++;
                 }
 
-                if(vDepthIdx[j].first>mThDepth && nPoints>100)
+                if(vDepthIdx[j].first>mThDepth && nPoints>maxPoint)
+                {
                     break;
+                }
             }
+            //Verbose::PrintMess("new mps for stereo KF: " + to_string(nPoints), Verbose::VERBOSITY_NORMAL);
         }
     }
+
 
     mpLocalMapper->InsertKeyFrame(pKF);
 
@@ -1997,6 +3357,7 @@ void Tracking::SearchLocalPoints()
                 pMP->IncreaseVisible();
                 pMP->mnLastFrameSeen = mCurrentFrame.mnId;
                 pMP->mbTrackInView = false;
+                pMP->mbTrackInViewR = false;
             }
         }
     }
@@ -2007,6 +3368,7 @@ void Tracking::SearchLocalPoints()
     for(vector<MapPoint*>::iterator vit=mvpLocalMapPoints.begin(), vend=mvpLocalMapPoints.end(); vit!=vend; vit++)
     {
         MapPoint* pMP = *vit;
+
         if(pMP->mnLastFrameSeen == mCurrentFrame.mnId)
             continue;
         if(pMP->isBad())
@@ -2017,25 +3379,45 @@ void Tracking::SearchLocalPoints()
             pMP->IncreaseVisible();
             nToMatch++;
         }
+        if(pMP->mbTrackInView)
+        {
+            mCurrentFrame.mmProjectPoints[pMP->mnId] = cv::Point2f(pMP->mTrackProjX, pMP->mTrackProjY);
+        }
     }
 
     if(nToMatch>0)
     {
         ORBmatcher matcher(0.8);
         int th = 1;
-        if(mSensor==System::RGBD)
+        if(mSensor==System::RGBD || mSensor==System::IMU_RGBD)
             th=3;
+        if(mpAtlas->isImuInitialized())
+        {
+            if(mpAtlas->GetCurrentMap()->GetIniertialBA2())
+                th=2;
+            else
+                th=6;
+        }
+        else if(!mpAtlas->isImuInitialized() && (mSensor==System::IMU_MONOCULAR || mSensor==System::IMU_STEREO || mSensor == System::IMU_RGBD))
+        {
+            th=10;
+        }
+
         // If the camera has been relocalised recently, perform a coarser search
         if(mCurrentFrame.mnId<mnLastRelocFrameId+2)
             th=5;
-        matcher.SearchByProjection(mCurrentFrame,mvpLocalMapPoints,th);
+
+        if(mState==LOST || mState==RECENTLY_LOST) // Lost for less than 1 second
+            th=15; // 15
+
+        int matches = matcher.SearchByProjection(mCurrentFrame, mvpLocalMapPoints, th, mpLocalMapper->mbFarPoints, mpLocalMapper->mThFarPoints);
     }
 }
 
 void Tracking::UpdateLocalMap()
 {
     // This is for visualization
-    mpMap->SetReferenceMapPoints(mvpLocalMapPoints);
+    mpAtlas->SetReferenceMapPoints(mvpLocalMapPoints);
 
     // Update
     UpdateLocalKeyFrames();
@@ -2046,13 +3428,16 @@ void Tracking::UpdateLocalPoints()
 {
     mvpLocalMapPoints.clear();
 
-    for(vector<KeyFrame*>::const_iterator itKF=mvpLocalKeyFrames.begin(), itEndKF=mvpLocalKeyFrames.end(); itKF!=itEndKF; itKF++)
+    int count_pts = 0;
+
+    for(vector<KeyFrame*>::const_reverse_iterator itKF=mvpLocalKeyFrames.rbegin(), itEndKF=mvpLocalKeyFrames.rend(); itKF!=itEndKF; ++itKF)
     {
         KeyFrame* pKF = *itKF;
         const vector<MapPoint*> vpMPs = pKF->GetMapPointMatches();
 
         for(vector<MapPoint*>::const_iterator itMP=vpMPs.begin(), itEndMP=vpMPs.end(); itMP!=itEndMP; itMP++)
         {
+
             MapPoint* pMP = *itMP;
             if(!pMP)
                 continue;
@@ -2060,6 +3445,7 @@ void Tracking::UpdateLocalPoints()
                 continue;
             if(!pMP->isBad())
             {
+                count_pts++;
                 mvpLocalMapPoints.push_back(pMP);
                 pMP->mnTrackReferenceForFrame=mCurrentFrame.mnId;
             }
@@ -2072,26 +3458,51 @@ void Tracking::UpdateLocalKeyFrames()
 {
     // Each map point vote for the keyframes in which it has been observed
     map<KeyFrame*,int> keyframeCounter;
-    for(int i=0; i<mCurrentFrame.N; i++)
+    if(!mpAtlas->isImuInitialized() || (mCurrentFrame.mnId<mnLastRelocFrameId+2))
     {
-        if(mCurrentFrame.mvpMapPoints[i])
+        for(int i=0; i<mCurrentFrame.N; i++)
         {
             MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
-            if(!pMP->isBad())
+            if(pMP)
             {
-                const map<KeyFrame*,size_t> observations = pMP->GetObservations();
-                for(map<KeyFrame*,size_t>::const_iterator it=observations.begin(), itend=observations.end(); it!=itend; it++)
-                    keyframeCounter[it->first]++;
+                if(!pMP->isBad())
+                {
+                    const map<KeyFrame*,tuple<int,int>> observations = pMP->GetObservations();
+                    for(map<KeyFrame*,tuple<int,int>>::const_iterator it=observations.begin(), itend=observations.end(); it!=itend; it++)
+                        keyframeCounter[it->first]++;
+                }
+                else
+                {
+                    mCurrentFrame.mvpMapPoints[i]=NULL;
+                }
             }
-            else
+        }
+    }
+    else
+    {
+        for(int i=0; i<mLastFrame.N; i++)
+        {
+            // Using lastframe since current frame has not matches yet
+            if(mLastFrame.mvpMapPoints[i])
             {
-                mCurrentFrame.mvpMapPoints[i]=NULL;
+                MapPoint* pMP = mLastFrame.mvpMapPoints[i];
+                if(!pMP)
+                    continue;
+                if(!pMP->isBad())
+                {
+                    const map<KeyFrame*,tuple<int,int>> observations = pMP->GetObservations();
+                    for(map<KeyFrame*,tuple<int,int>>::const_iterator it=observations.begin(), itend=observations.end(); it!=itend; it++)
+                        keyframeCounter[it->first]++;
+                }
+                else
+                {
+                    // MODIFICATION
+                    mLastFrame.mvpMapPoints[i]=NULL;
+                }
             }
         }
     }
 
-    if(keyframeCounter.empty())
-        return;
 
     int max=0;
     KeyFrame* pKFmax= static_cast<KeyFrame*>(NULL);
@@ -2113,21 +3524,21 @@ void Tracking::UpdateLocalKeyFrames()
             pKFmax=pKF;
         }
 
-        mvpLocalKeyFrames.push_back(it->first);
+        mvpLocalKeyFrames.push_back(pKF);
         pKF->mnTrackReferenceForFrame = mCurrentFrame.mnId;
     }
-
 
     // Include also some not-already-included keyframes that are neighbors to already-included keyframes
     for(vector<KeyFrame*>::const_iterator itKF=mvpLocalKeyFrames.begin(), itEndKF=mvpLocalKeyFrames.end(); itKF!=itEndKF; itKF++)
     {
         // Limit the number of keyframes
-        if(mvpLocalKeyFrames.size()>80)
+        if(mvpLocalKeyFrames.size()>80) // 80
             break;
 
         KeyFrame* pKF = *itKF;
 
         const vector<KeyFrame*> vNeighs = pKF->GetBestCovisibilityKeyFrames(10);
+
 
         for(vector<KeyFrame*>::const_iterator itNeighKF=vNeighs.begin(), itEndNeighKF=vNeighs.end(); itNeighKF!=itEndNeighKF; itNeighKF++)
         {
@@ -2168,7 +3579,24 @@ void Tracking::UpdateLocalKeyFrames()
                 break;
             }
         }
+    }
 
+    // Add 10 last temporal KFs (mainly for IMU)
+    if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) &&mvpLocalKeyFrames.size()<80)
+    {
+        KeyFrame* tempKeyFrame = mCurrentFrame.mpLastKeyFrame;
+
+        const int Nd = 20;
+        for(int i=0; i<Nd; i++){
+            if (!tempKeyFrame)
+                break;
+            if(tempKeyFrame->mnTrackReferenceForFrame!=mCurrentFrame.mnId)
+            {
+                mvpLocalKeyFrames.push_back(tempKeyFrame);
+                tempKeyFrame->mnTrackReferenceForFrame=mCurrentFrame.mnId;
+                tempKeyFrame=tempKeyFrame->mPrevKF;
+            }
+        }
     }
 
     if(pKFmax)
@@ -2178,109 +3606,20 @@ void Tracking::UpdateLocalKeyFrames()
     }
 }
 
-bool Tracking::RelocalizationFromObjects(bool use_points)
-{
-    std::vector<BBox2, Eigen::aligned_allocator<BBox2>> bboxes;
-    std::vector<size_t> bboxes_categories;
-    for (auto det : current_frame_good_detections_) {
-        if (det->score > 0.1) {
-            bboxes.push_back(det->bbox);
-            bboxes_categories.push_back(det->category_id);
-        }
-    }
-    std::vector<Ellipsoid, Eigen::aligned_allocator<Ellipsoid>> ellipsoids;
-    std::vector<size_t> ellipsoids_categories;
-    auto objects = mpMap->GetAllMapObjects();
-    for (auto* obj : objects) {
-        ellipsoids.push_back(obj->GetEllipsoid());
-        ellipsoids_categories.push_back(obj->GetTrack()->GetCategoryId());
-    }
-    std::cout << "Nb detections / ellipsoids = " << bboxes.size() << " / " << ellipsoids.size() << "\n";
-
-    auto [best_index, poses, scores, used_pairs, used_inliers]
-        = ORB_SLAM2::solveP3P_ransac(ellipsoids, ellipsoids_categories, bboxes, bboxes_categories, K_, 0.2);
-
-    if (best_index == -1 || poses.size() == 0 || scores[best_index] > bboxes.size())
-        return false; // reloc failed
-
-    std::vector<int> indices(poses.size());
-    std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(), [&scores](int a, int b) {
-        return scores[a] < scores[b];
-    });
-
-    cv::Mat best_Rt_objects;
-    for (int i = 0; i < indices.size() && scores[indices[i]] < bboxes.size(); ++i) {
-        int best_index = indices[i]; // current index
-
-        const auto& pose_est = poses[best_index];
-        Eigen::Matrix3d o_est = pose_est.block<3, 3>(0, 0);
-        Eigen::Vector3d p_est = pose_est.col(3);
-        Matrix34d Rt_est;
-        Rt_est << o_est.transpose(), -o_est.transpose() * p_est;
-        cv::Mat Rt(4, 4, CV_32F, 0.0);
-        for (size_t i = 0; i < 3; ++i)
-            for (size_t j = 0; j < 4; ++j)
-                Rt.at<float>(i, j) = Rt_est(i, j);
-        Rt.at<float>(3, 3) = 1.0;
-        mCurrentFrame.SetPose(Rt);
-
-        // Optimize camera pose by minimizing object reprojection error
-        std::vector<Ellipse, Eigen::aligned_allocator<Ellipse>> ellipses_inliers;
-        std::vector<Ellipsoid, Eigen::aligned_allocator<Ellipsoid>> ellipsoids_inliers;
-        for (auto x : used_inliers[best_index]) {
-            Ellipse ellipse = Ellipse::FromBbox(bboxes[x.first]);
-            ellipses_inliers.push_back(ellipse);
-            ellipsoids_inliers.push_back(ellipsoids[x.second]);
-        }
-
-        Rt = OptimizePoseFromObjects(ellipses_inliers, ellipsoids_inliers, Rt, K_);
-
-        if (i == 0) {
-            best_Rt_objects = Rt;
-        }
-        // Match keypoints from the current frame to map points using the estimated pose
-        auto map_points = mpMap->GetAllMapPoints();
-        ORBmatcher matcher(0.9, true);
-        int nb_matches = matcher.SearchByProjectionAllPoints(mCurrentFrame, map_points, 10, 100);
-        std::cout << nb_matches << " matched points by projection.\n";
-
-        if (nb_matches > 10) // the pose is considered as good, we can stop
-        {
-            if (use_points) {
-                // further optimization
-                int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
-                std::cout << "Optimized pose using matched map points.\n";
-                // Maybe add a second step if not enough inliers
-            }
-
-            mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.mTcw);
-            // mnLastRelocFrameId = mCurrentFrame.mnId; // causes problems to resume tracking
-            return true;
-        }
-    }
-
-
-    mCurrentFrame.SetPose(best_Rt_objects);
-    mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.mTcw);
-    // mnLastRelocFrameId = mCurrentFrame.mnId; // cause problems to resume tracking
-
-    return true;
-}
-
 bool Tracking::Relocalization()
 {
-    mLastProcessedState = mState;
-
+    Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
     // Compute Bag of Words Vector
     mCurrentFrame.ComputeBoW();
 
     // Relocalization is performed when tracking is lost
     // Track Lost: Query KeyFrame Database for keyframe candidates for relocalisation
-    vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame);
+    vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame, mpAtlas->GetCurrentMap());
 
-    if(vpCandidateKFs.empty())
+    if(vpCandidateKFs.empty()) {
+        Verbose::PrintMess("There are not candidates", Verbose::VERBOSITY_NORMAL);
         return false;
+    }
 
     const int nKFs = vpCandidateKFs.size();
 
@@ -2288,8 +3627,8 @@ bool Tracking::Relocalization()
     // If enough matches are found we setup a PnP solver
     ORBmatcher matcher(0.75,true);
 
-    vector<PnPsolver*> vpPnPsolvers;
-    vpPnPsolvers.resize(nKFs);
+    vector<MLPnPsolver*> vpMLPnPsolvers;
+    vpMLPnPsolvers.resize(nKFs);
 
     vector<vector<MapPoint*> > vvpMapPointMatches;
     vvpMapPointMatches.resize(nKFs);
@@ -2314,9 +3653,9 @@ bool Tracking::Relocalization()
             }
             else
             {
-                PnPsolver* pSolver = new PnPsolver(mCurrentFrame,vvpMapPointMatches[i]);
-                pSolver->SetRansacParameters(0.99,10,300,4,0.5,5.991);
-                vpPnPsolvers[i] = pSolver;
+                MLPnPsolver* pSolver = new MLPnPsolver(mCurrentFrame,vvpMapPointMatches[i]);
+                pSolver->SetRansacParameters(0.99,10,300,6,0.5,5.991);  //This solver needs at least 6 points
+                vpMLPnPsolvers[i] = pSolver;
                 nCandidates++;
             }
         }
@@ -2339,8 +3678,9 @@ bool Tracking::Relocalization()
             int nInliers;
             bool bNoMore;
 
-            PnPsolver* pSolver = vpPnPsolvers[i];
-            cv::Mat Tcw = pSolver->iterate(5,bNoMore,vbInliers,nInliers);
+            MLPnPsolver* pSolver = vpMLPnPsolvers[i];
+            Eigen::Matrix4f eigTcw;
+            bool bTcw = pSolver->iterate(5,bNoMore,vbInliers,nInliers, eigTcw);
 
             // If Ransac reachs max. iterations discard keyframe
             if(bNoMore)
@@ -2350,9 +3690,11 @@ bool Tracking::Relocalization()
             }
 
             // If a Camera Pose is computed, optimize
-            if(!Tcw.empty())
+            if(bTcw)
             {
-                Tcw.copyTo(mCurrentFrame.mTcw);
+                Sophus::SE3f Tcw(eigTcw);
+                mCurrentFrame.SetPose(Tcw);
+                // Tcw.copyTo(mCurrentFrame.mTcw);
 
                 set<MapPoint*> sFound;
 
@@ -2428,15 +3770,16 @@ bool Tracking::Relocalization()
     else
     {
         mnLastRelocFrameId = mCurrentFrame.mnId;
+        cout << "Relocalized!!" << endl;
         return true;
     }
 
 }
 
-void Tracking::Reset()
+void Tracking::Reset(bool bLocMap)
 {
+    Verbose::PrintMess("System Reseting", Verbose::VERBOSITY_NORMAL);
 
-    cout << "System Reseting" << endl;
     if(mpViewer)
     {
         mpViewer->RequestStop();
@@ -2445,48 +3788,149 @@ void Tracking::Reset()
     }
 
     // Reset Local Mapping
-    cout << "Reseting Local Mapper...";
-    mpLocalMapper->RequestReset();
-    cout << " done" << endl;
-
-    if (local_object_mapper_) {
-        cout << "Reseting Local Object Mapper...";
-        local_object_mapper_->RequestReset();
-        cout << " done" << endl;
+    if (!bLocMap)
+    {
+        Verbose::PrintMess("Reseting Local Mapper...", Verbose::VERBOSITY_NORMAL);
+        mpLocalMapper->RequestReset();
+        Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
     }
 
+
     // Reset Loop Closing
-    cout << "Reseting Loop Closing...";
+    Verbose::PrintMess("Reseting Loop Closing...", Verbose::VERBOSITY_NORMAL);
     mpLoopClosing->RequestReset();
-    cout << " done" << endl;
+    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
 
     // Clear BoW Database
-    cout << "Reseting Database...";
+    Verbose::PrintMess("Reseting Database...", Verbose::VERBOSITY_NORMAL);
     mpKeyFrameDB->clear();
-    cout << " done" << endl;
+    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
 
     // Clear Map (this erase MapPoints and KeyFrames)
-    objectTracks_.clear();
-    mpMap->clear();
-
+    mpAtlas->clearAtlas();
+    mpAtlas->CreateNewMap();
+    if (mSensor==System::IMU_STEREO || mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_RGBD)
+        mpAtlas->SetInertialSensor();
+    mnInitialFrameId = 0;
 
     KeyFrame::nNextId = 0;
     Frame::nNextId = 0;
     mState = NO_IMAGES_YET;
 
-    if(mpInitializer)
-    {
-        delete mpInitializer;
-        mpInitializer = static_cast<Initializer*>(NULL);
-    }
+    mbReadyToInitializate = false;
+    mbSetInit=false;
 
     mlRelativeFramePoses.clear();
     mlpReferences.clear();
     mlFrameTimes.clear();
     mlbLost.clear();
+    mCurrentFrame = Frame();
+    mnLastRelocFrameId = 0;
+    mLastFrame = Frame();
+    mpReferenceKF = static_cast<KeyFrame*>(NULL);
+    mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+    mvIniMatches.clear();
 
     if(mpViewer)
         mpViewer->Release();
+
+    Verbose::PrintMess("   End reseting! ", Verbose::VERBOSITY_NORMAL);
+}
+
+void Tracking::ResetActiveMap(bool bLocMap)
+{
+    Verbose::PrintMess("Active map Reseting", Verbose::VERBOSITY_NORMAL);
+    if(mpViewer)
+    {
+        mpViewer->RequestStop();
+        while(!mpViewer->isStopped())
+            usleep(3000);
+    }
+
+    Map* pMap = mpAtlas->GetCurrentMap();
+
+    if (!bLocMap)
+    {
+        Verbose::PrintMess("Reseting Local Mapper...", Verbose::VERBOSITY_VERY_VERBOSE);
+        mpLocalMapper->RequestResetActiveMap(pMap);
+        Verbose::PrintMess("done", Verbose::VERBOSITY_VERY_VERBOSE);
+    }
+
+    // Reset Loop Closing
+    Verbose::PrintMess("Reseting Loop Closing...", Verbose::VERBOSITY_NORMAL);
+    mpLoopClosing->RequestResetActiveMap(pMap);
+    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+
+    // Clear BoW Database
+    Verbose::PrintMess("Reseting Database", Verbose::VERBOSITY_NORMAL);
+    mpKeyFrameDB->clearMap(pMap); // Only clear the active map references
+    Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+
+    // Clear Map (this erase MapPoints and KeyFrames)
+    mpAtlas->clearMap();
+
+
+    //KeyFrame::nNextId = mpAtlas->GetLastInitKFid();
+    //Frame::nNextId = mnLastInitFrameId;
+    mnLastInitFrameId = Frame::nNextId;
+    //mnLastRelocFrameId = mnLastInitFrameId;
+    mState = NO_IMAGES_YET; //NOT_INITIALIZED;
+
+    mbReadyToInitializate = false;
+
+    list<bool> lbLost;
+    // lbLost.reserve(mlbLost.size());
+    unsigned int index = mnFirstFrameId;
+    cout << "mnFirstFrameId = " << mnFirstFrameId << endl;
+    for(Map* pMap : mpAtlas->GetAllMaps())
+    {
+        if(pMap->GetAllKeyFrames().size() > 0)
+        {
+            if(index > pMap->GetLowerKFID())
+                index = pMap->GetLowerKFID();
+        }
+    }
+
+    //cout << "First Frame id: " << index << endl;
+    int num_lost = 0;
+    cout << "mnInitialFrameId = " << mnInitialFrameId << endl;
+
+    for(list<bool>::iterator ilbL = mlbLost.begin(); ilbL != mlbLost.end(); ilbL++)
+    {
+        if(index < mnInitialFrameId)
+            lbLost.push_back(*ilbL);
+        else
+        {
+            lbLost.push_back(true);
+            num_lost += 1;
+        }
+
+        index++;
+    }
+    cout << num_lost << " Frames set to lost" << endl;
+
+    mlbLost = lbLost;
+
+    mnInitialFrameId = mCurrentFrame.mnId;
+    mnLastRelocFrameId = mCurrentFrame.mnId;
+
+    mCurrentFrame = Frame();
+    mLastFrame = Frame();
+    mpReferenceKF = static_cast<KeyFrame*>(NULL);
+    mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+    mvIniMatches.clear();
+
+    mbVelocity = false;
+
+    if(mpViewer)
+        mpViewer->Release();
+
+    Verbose::PrintMess("   End reseting! ", Verbose::VERBOSITY_NORMAL);
+}
+
+vector<MapPoint*> Tracking::GetLocalMapMPS()
+{
+    return mvpLocalMapPoints;
 }
 
 void Tracking::ChangeCalibration(const string &strSettingPath)
@@ -2496,6 +3940,12 @@ void Tracking::ChangeCalibration(const string &strSettingPath)
     float fy = fSettings["Camera.fy"];
     float cx = fSettings["Camera.cx"];
     float cy = fSettings["Camera.cy"];
+
+    mK_.setIdentity();
+    mK_(0,0) = fx;
+    mK_(1,1) = fy;
+    mK_(0,2) = cx;
+    mK_(1,2) = cy;
 
     cv::Mat K = cv::Mat::eye(3,3,CV_32F);
     K.at<float>(0,0) = fx;
@@ -2527,6 +3977,150 @@ void Tracking::InformOnlyTracking(const bool &flag)
     mbOnlyTracking = flag;
 }
 
+void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame)
+{
+    Map * pMap = pCurrentKeyFrame->GetMap();
+    unsigned int index = mnFirstFrameId;
+    list<ORB_SLAM3::KeyFrame*>::iterator lRit = mlpReferences.begin();
+    list<bool>::iterator lbL = mlbLost.begin();
+    for(auto lit=mlRelativeFramePoses.begin(),lend=mlRelativeFramePoses.end();lit!=lend;lit++, lRit++, lbL++)
+    {
+        if(*lbL)
+            continue;
 
+        KeyFrame* pKF = *lRit;
+
+        while(pKF->isBad())
+        {
+            pKF = pKF->GetParent();
+        }
+
+        if(pKF->GetMap() == pMap)
+        {
+            (*lit).translation() *= s;
+        }
+    }
+
+    mLastBias = b;
+
+    mpLastKeyFrame = pCurrentKeyFrame;
+
+    mLastFrame.SetNewBias(mLastBias);
+    mCurrentFrame.SetNewBias(mLastBias);
+
+    while(!mCurrentFrame.imuIsPreintegrated())
+    {
+        usleep(500);
+    }
+
+
+    if(mLastFrame.mnId == mLastFrame.mpLastKeyFrame->mnFrameId)
+    {
+        mLastFrame.SetImuPoseVelocity(mLastFrame.mpLastKeyFrame->GetImuRotation(),
+                                      mLastFrame.mpLastKeyFrame->GetImuPosition(),
+                                      mLastFrame.mpLastKeyFrame->GetVelocity());
+    }
+    else
+    {
+        const Eigen::Vector3f Gz(0, 0, -IMU::GRAVITY_VALUE);
+        const Eigen::Vector3f twb1 = mLastFrame.mpLastKeyFrame->GetImuPosition();
+        const Eigen::Matrix3f Rwb1 = mLastFrame.mpLastKeyFrame->GetImuRotation();
+        const Eigen::Vector3f Vwb1 = mLastFrame.mpLastKeyFrame->GetVelocity();
+        float t12 = mLastFrame.mpImuPreintegrated->dT;
+
+        mLastFrame.SetImuPoseVelocity(IMU::NormalizeRotation(Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaRotation()),
+                                      twb1 + Vwb1*t12 + 0.5f*t12*t12*Gz+ Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaPosition(),
+                                      Vwb1 + Gz*t12 + Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaVelocity());
+    }
+
+    if (mCurrentFrame.mpImuPreintegrated)
+    {
+        const Eigen::Vector3f Gz(0, 0, -IMU::GRAVITY_VALUE);
+
+        const Eigen::Vector3f twb1 = mCurrentFrame.mpLastKeyFrame->GetImuPosition();
+        const Eigen::Matrix3f Rwb1 = mCurrentFrame.mpLastKeyFrame->GetImuRotation();
+        const Eigen::Vector3f Vwb1 = mCurrentFrame.mpLastKeyFrame->GetVelocity();
+        float t12 = mCurrentFrame.mpImuPreintegrated->dT;
+
+        mCurrentFrame.SetImuPoseVelocity(IMU::NormalizeRotation(Rwb1*mCurrentFrame.mpImuPreintegrated->GetUpdatedDeltaRotation()),
+                                      twb1 + Vwb1*t12 + 0.5f*t12*t12*Gz+ Rwb1*mCurrentFrame.mpImuPreintegrated->GetUpdatedDeltaPosition(),
+                                      Vwb1 + Gz*t12 + Rwb1*mCurrentFrame.mpImuPreintegrated->GetUpdatedDeltaVelocity());
+    }
+
+    mnFirstImuFrameId = mCurrentFrame.mnId;
+}
+
+void Tracking::NewDataset()
+{
+    mnNumDataset++;
+}
+
+int Tracking::GetNumberDataset()
+{
+    return mnNumDataset;
+}
+
+int Tracking::GetMatchesInliers()
+{
+    return mnMatchesInliers;
+}
+
+void Tracking::SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, string strFolder)
+{
+    mpSystem->SaveTrajectoryEuRoC(strFolder + strNameFile_frames);
+    //mpSystem->SaveKeyFrameTrajectoryEuRoC(strFolder + strNameFile_kf);
+}
+
+void Tracking::SaveSubTrajectory(string strNameFile_frames, string strNameFile_kf, Map* pMap)
+{
+    mpSystem->SaveTrajectoryEuRoC(strNameFile_frames, pMap);
+    if(!strNameFile_kf.empty())
+        mpSystem->SaveKeyFrameTrajectoryEuRoC(strNameFile_kf, pMap);
+}
+
+float Tracking::GetImageScale()
+{
+    return mImageScale;
+}
+
+#ifdef REGISTER_LOOP
+void Tracking::RequestStop()
+{
+    unique_lock<mutex> lock(mMutexStop);
+    mbStopRequested = true;
+}
+
+bool Tracking::Stop()
+{
+    unique_lock<mutex> lock(mMutexStop);
+    if(mbStopRequested && !mbNotStop)
+    {
+        mbStopped = true;
+        cout << "Tracking STOP" << endl;
+        return true;
+    }
+
+    return false;
+}
+
+bool Tracking::stopRequested()
+{
+    unique_lock<mutex> lock(mMutexStop);
+    return mbStopRequested;
+}
+
+bool Tracking::isStopped()
+{
+    unique_lock<mutex> lock(mMutexStop);
+    return mbStopped;
+}
+
+void Tracking::Release()
+{
+    unique_lock<mutex> lock(mMutexStop);
+    mbStopped = false;
+    mbStopRequested = false;
+}
+#endif
 
 } //namespace ORB_SLAM
