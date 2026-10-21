@@ -155,7 +155,8 @@ These are single runs to check the port, not the benchmark (use `scripts/run_ben
 
 ## License
 
-GPLv3, as OA-SLAM, ORB-SLAM2 and ORB-SLAM3 (see `LICENSE` and `LICENSE_ORB_SLAM3`).
+`LICENSE` is the license file of OA-SLAM-InstanceSeg (GNU AGPLv3); the OA-SLAM source headers state GPLv3.
+ORB-SLAM3 is GPLv3 (`LICENSE_ORB_SLAM3`).
 
 - M. Zins, G. Simon, M.-O. Berger, *OA-SLAM: Leveraging Objects for Camera Relocalization in Visual SLAM*, ISMAR 2022.
 - C. Campos, R. Elvira, J. J. Gómez Rodríguez, J. M. M. Montiel, J. D. Tardós, *ORB-SLAM3: An Accurate
