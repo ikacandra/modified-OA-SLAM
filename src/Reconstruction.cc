@@ -23,7 +23,7 @@
 #include <Eigen/Dense>
 #include "Distance.h"
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 

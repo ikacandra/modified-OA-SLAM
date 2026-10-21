@@ -1,201 +1,162 @@
-# ORB-SLAM2
+# modified-OA-SLAM: OA-SLAM on an ORB-SLAM3 backbone with YOLOv8n-seg
 
-**Associated Publication:**
-- **OA-SLAM: Leveraging Objects for Camera Relocalization in Visual SLAM.** Matthieu Zins, Gilles Simon, Marie-Odile Berger, *IEEE International Symposium on Mixed and Augmented Reality (ISMAR 2022).* [Paper](https://arxiv.org/abs/2209.08338) | [Video](https://youtu.be/L1HEL4kLJ3g) | [AR Demo](https://youtu.be/PXG_6LkbtgY)
+This repository is a modified version of [OA-SLAM-InstanceSeg](https://github.com/risetslamelins/OA-SLAM-InstanceSeg)
+(itself based on [OA-SLAM](https://gitlab.inria.fr/tangram/oa-slam), Zins et al., ISMAR 2022):
 
-- **Object-Aided SLAM in a World of Objects**, *Demo CVPR 2023*
+1. **Instance segmentation front end: YOLOv8n-seg.** Detections and masks come from YOLOv8n-seg, either
+   - a TensorRT engine (`.engine`, e.g. FP16 built on the Jetson with `trtexec`), see `src/TRTDetector.cc`, or
+   - the ONNX model with the OpenCV DNN backend (`.onnx`), or
+   - a JSON file of precomputed detections (`.json`).
+2. **SLAM backbone: ORB-SLAM3 v1.0** ([UZ-SLAMLab/ORB_SLAM3@4452a3c](https://github.com/UZ-SLAMLab/ORB_SLAM3))
+   instead of ORB-SLAM2. The OA-SLAM object layer (ellipsoid objects, object tracks, local object
+   mapping, object-based relocalization) runs on top of the ORB-SLAM3 Atlas.
 
+The git history keeps the steps separate:
 
-<p align="center">
-<a href="https://youtu.be/PXG_6LkbtgY"> <img src="Doc/OA-SLAM_AR_demo.png" width="640"> </a>
-</p>
+| commit | content |
+|---|---|
+| `Hoan thanh save Ground Truth ...` | OA-SLAM-InstanceSeg as cloned (ORB-SLAM2) |
+| `Add YOLOv8n-seg TensorRT detector ...` | YOLOv8n-seg TensorRT detector, RGB-D camera files, benchmark scripts (still ORB-SLAM2) |
+| `Import ORB-SLAM3 v1.0 core ...` | pristine ORB-SLAM3 sources in place of ORB-SLAM2 (does not build on its own) |
+| `Port the OA-SLAM object layer to ORB-SLAM3` | all the integration changes (`git show` that commit to review them against ORB-SLAM3) |
 
+## What the OA-SLAM layer does in the ORB-SLAM3 backbone
 
+Every change in the ORB-SLAM3 sources is marked with `[OA-SLAM]` or `[ADAPTIVE WEIGHT]`.
 
-<p align="center">
-<img src="Doc/OA-SLAM.png" width="640">
-</p>
+- **Dynamic objects** (`Tracking::PrepareDetections`, `ORBextractor::operator()`): the masks of the
+  *person* detections (COCO id 0) are merged, dilated (15x15) and passed to the `Frame`; ORB keypoints
+  inside the mask are discarded.
+- **Adaptive weights** (`Optimizer::PoseOptimization`): RGB-D (stereo) observations inside a static object
+  mask get a weight of 1.5, inside an AprilTag box 2.0 (AprilTag id 1000 is not a COCO class, so this is
+  disabled with the stock model).
+- **Object tracking and mapping** (`Tracking::TrackObjects`): detections with score > 0.5 are associated to
+  object tracks (Hungarian algorithm on 2D IoU / projected-ellipsoid IoU, plus shared map points),
+  ellipsoids are reconstructed, optimized and inserted in the map; `LocalObjectMapping` refines and fuses
+  them in its own thread. The association parameters can be changed by environment variables, the defaults
+  are the original values: `OA_IOU2D=0.2`, `OA_IOU3D=0.3`, `OA_MIN_OBS=10`.
+- **Relocalization** (`Tracking::RelocalizationWithMode`): `points` (ORB-SLAM3), `objects` (P3P on
+  ellipsoids/detections) or `points+objects` (objects when points fail). It is used in the
+  `RECENTLY_LOST` state of ORB-SLAM3 and in localization mode.
+- **Atlas (multi-map)**: objects are stored per `Map`. Only the tracks of the active map are associated;
+  when tracking is lost and ORB-SLAM3 starts a new map, objects stay in their map. When LoopClosing merges
+  the active map into an older one (`MergeLocal`), the objects are moved and their ellipsoids are
+  transformed with the merge similarity. `ResetActiveMap` removes the objects of that map.
+- **Viewer**: ellipsoids, object points, detections and projected ellipses as in OA-SLAM, with the
+  `Pause`, `Quit`, `Color by Cat`, `Disp 3D Bboxes` menu entries.
 
-
-
-<p align="center">
-<a href="https://youtu.be/L1HEL4kLJ3g"> <img src="Doc/OA-SLAM_video.png" width="640"> </a>
-</p>
-
-
-# Installation
+Not ported (tied to ORB-SLAM2 internals): Osmap map saving/loading, the `oa-slam_localization` example, the Dockerfile,
+the AR viewer, the ROS 2 node, and objects in the local bundle adjustment (`use_objects_in_local_BA` 1/2;
+the default 0, used for all the experiments, is what this version does). ORB-SLAM3 can save/load its
+Atlas itself (`System.SaveAtlasToFile` / `System.LoadAtlasFromFile` in the settings file), without the objects.
 
 ## Dependencies
 
-- [Pangolin](https://github.com/stevenlovegrove/Pangolin) for visualization and user interface.
-- [OpenCV](http://opencv.org) to manipulate images and features. Version >= 4 is required for live object detection. (tested with 4.6)
-- [Eigen3](https://gitlab.com/libeigen/eigen) for linear algebra.
-- [Dlib](https://github.com/davisking/dlib) for the Hungarian algorithm.
-- [Protocol Buffers](https://github.com/protocolbuffers/protobuf) for Osmap.
+Tested on Jetson (JetPack 5.1.3 / L4T R35.5, CUDA 11.4, TensorRT 8.5, OpenCV 4.10, GCC 9.4, CMake 3.16).
 
-Included in the *Thirdparty* folder:
-- [DBoW2](https://github.com/dorian3d/DBoW2) for place recognition.
-- [g2o](https://github.com/RainerKuemmerle/g2o) for graph-based non-linear optimization.
-- [JSON](https://github.com/nlohmann/json) for I/O json files.
-- [Osmap](https://github.com/AlejandroSilvestri/osmap) for map saving/loading. Modified version to handle objects.
+- ORB-SLAM3 requirements: [Pangolin](https://github.com/stevenlovegrove/Pangolin), OpenCV >= 4.4 (with the
+  `dnn` module), Eigen3, Boost (serialization), OpenSSL (libcrypto).
+- [Dlib](https://github.com/davisking/dlib) (Hungarian algorithm).
+- TensorRT + CUDA runtime (optional, for `.engine` models; detected by CMake).
+
+Included in `Thirdparty`: DBoW2, g2o and Sophus (ORB-SLAM3 versions), [nlohmann/json](https://github.com/nlohmann/json).
 
 ## Building
 
-Clone the repository recursively:
 ```
-git clone https://gitlab.inria.fr/tangram/oa-slam OA-SLAM --recursive
-```
-
-Build OA-SLAM:
-```
-sh build.sh
+./build.sh
 ```
 
+It builds DBoW2 and g2o, extracts the vocabulary and builds `lib/libOA_SLAM3.so`,
+`bin/oa-slam_rgb-d-offline` (RGB-D sequences) and `bin/oa-slam` (monocular / webcam).
 
+### YOLOv8n-seg model
 
+`models/yolov8n-seg.onnx` is the stock COCO model exported from Ultralytics (640x640). TensorRT engines are
+specific to the device and TensorRT version, so build the engine on the target:
 
-
-# Data
-
-
-Some test sequences are available in the [TUM-RGB dataset](https://vision.in.tum.de/data/datasets/rgbd-dataset).
-In particular, we use the *fr2/desk* scene.
-
-Sample data of our custom scenes are available at: [https://dorel.univ-lorraine.fr/dataset.xhtml?persistentId=doi%3A10.12763%2F2CZWJP](https://dorel.univ-lorraine.fr/dataset.xhtml?persistentId=doi%3A10.12763%2F2CZWJP)
-
-
-Our system takes object detections as input. We provide detections in JSON files for the sample data and for *fr2/desk* in the *Data* folder. They can be obtained from any object detector.
-We used an off-the-shelf version of [YOLOv5](https://github.com/ultralytics/yolov5) for our custom scene and a fine-tuned version for *fr2/desk*.
-
-The camera parameters for the sample data are available in *Cameras/MI9T_640x360_0.6.yaml*.
-The parameters for *fr2/desk* are in *Cameras/TUM2.yaml*.
-
-# SLAM mode
-
-OA-SLAM includes a map viewer, an image viewer and a AR viewer.
-
-Usage:
 ```
- ./oa-slam
+/usr/src/tensorrt/bin/trtexec --onnx=models/yolov8n-seg.onnx --saveEngine=models/yolov8n-seg_fp16.engine --fp16 --workspace=4096
+```
+
+## Camera files
+
+`Cameras/*.yaml` use the ORB-SLAM3 settings format (`File.version: "1.0"`). The RGB-D files
+(`TUM1_RGBD.yaml`, `TUM2_RGBD.yaml`, `TUM3_RGBD.yaml`, `Bonn_RGBD.yaml`) have the same intrinsics,
+distortion, depth factor and ORB parameters as the ORB-SLAM2 files of OA-SLAM-InstanceSeg; the ORB-SLAM2
+`Camera.bf` becomes `Stereo.b = bf / fx`.
+
+## Running
+
+### RGB-D sequence (TUM RGB-D / Bonn)
+
+```
+./bin/oa-slam_rgb-d-offline
       vocabulary_file
       camera_file
-      path_to_image_sequence (.txt file listing the images or a folder with rgb.txt or 'webcam_id')
-      detections_file (.json file with detections or .onnx yolov5 weights)
-      categories_to_ignore_file (file containing the categories to ignore (one category_id per line))
+      path_to_sequence (root folder)
+      path_to_association_file (.txt)
+      detections_file (.json, .onnx or .engine)
+      categories_to_ignore_file (one category id per line, or null)
       relocalization_mode ('points', 'objects' or 'points+objects')
-      output_name  
+      output_name
+      [use_viewer (0: off, 1: on and closed at the end; default: on, waits for Quit)]
 ```
 
-
-Example to run OA-SLAM on the scene *Table*:
-
-```
-./oa-slam ../Vocabulary/ORBvoc.txt ../Cameras/MI9T_640x360_0.6.yaml ../Data/sink_21/frames/ ../Data/detections_yolov5_sink_21.json null points+objects sink
-```
-
-
-Example to run OA-SLAM on the scene *Sink*:
+Example:
 
 ```
-./oa-slam ../Vocabulary/ORBvoc.txt ../Cameras/MI9T_640x360_0.6.yaml ../Data/sink_21/frames/ ../Data/detections_yolov5_sink_21.json null points+objects sink
+S=~/Riset_SLAM/Dataset/tum/rgbd_dataset_freiburg3_walking_xyz
+./bin/oa-slam_rgb-d-offline Vocabulary/ORBvoc.txt Cameras/TUM3_RGBD.yaml $S $S/associations.txt \
+    models/yolov8n-seg_fp16.engine null points+objects fr3_walking_xyz 1
 ```
 
+Outputs in the folder `<output_name>/`:
 
-Example to run OA-SLAM on the scene *fr2/desk*:
-```
-./oa-slam ../Vocabulary/ORBvoc.txt ../Cameras/TUM2.yaml ../Data/rgbd_dataset_freiburg2_desk/rgb.txt ../Data/detections_yolov5_tum_rgbd_fr2_desk.json null points+objects fr2
-```
+| file | content |
+|---|---|
+| `camera_poses_<name>_tum.txt` | pose returned for every frame (TUM format; identity when not localized), used by the benchmark scripts as for the ORB-SLAM2 version |
+| `CameraTrajectory_<name>_tum.txt` | ORB-SLAM3 `SaveTrajectoryTUM` (frames relative to their keyframes, after loop closure / map merging) |
+| `keyframes_poses_<name>_tum.txt`, `.json` | keyframe poses |
+| `map_objects_<name>.txt` / `.obj` | objects: `id category Q(4x4 dual quadric, column-major)` / ellipsoid point clouds |
+| `map_points_<name>.obj` | map points |
+| `frame_times_<name>.csv`, `statistics.txt` | per-frame detection / tracking time, FPS summary |
 
-## Live mode
-
-It is possible to run OA-SLAM live using a webcam and YOLOv5. Trained weights are available at: [https://dorel.univ-lorraine.fr/dataset.xhtml?persistentId=doi%3A10.12763%2F2CZWJP](https://dorel.univ-lorraine.fr/dataset.xhtml?persistentId=doi%3A10.12763%2F2CZWJP)
-
-These weights are either trained on COCO dataset or fine-tuned on our statutes and museum objects. Models for image size 640 and 320 are available.
-
-```
-./oa-slam ../Vocabulary/ORBvoc.txt ../Cameras/TUM2.yaml webcam_X yolov5_weights.onnx ../Data/ignore_statues_parts.txt points+objects output_folder
-```
-
-In ```webcam_X``` replace **X** by webcam id. YOLOv5 weights are in ONNX format. You can convert PyTorch weights into ONNX format using the ```export.py``` script in [YOLOv5](https://github.com/ultralytics/yolov5).
-
-In OA-SLAM, YOLOv5 expects images of size 320 x 320. Original size (640 x 640) can be used by modifying ```src/ImageDetections.cc:108```.
-
-
-
-# Localization mode
-
-
-This mode can be used when you have a good map of your working area. In this mode the Point and Object Mapping is deactivated. The system localizes and track the camera in the map, using relocalization if needed.
-It is possible to force relocalization on each frame by setting 'force_relocalization_on_each_frame' to 1.
-
-Usage:
-```
-  ./oa-slam_localization
-      vocabulary_file
-      camera_file
-      path_to_image_sequence (.txt file listing the images or a folder with rgb.txt)
-      detections_file (.json file with detections or .onnx yolov5 weights)
-      categories_to_ignore_file (file containing the categories to ignore (one category_id per line))
-      map_file (.yaml)
-      relocalization_mode ('points', 'objects' or 'points+objects')
-      output_name 
-      force_relocalization_on_each_frame (0 or 1)
-```
-
-
-Example to run OA-SLAM in **Localization** mode on an existing map of the scene *Table* (pre-built from the image sequence *table_6*):
+### Monocular
 
 ```
-./oa-slam_localization ../Vocabulary/ORBvoc.txt ../Cameras/MI9T_640x360_0.6.yaml ../Data/table_9/frames/  ../Data/detections_yolov5_table_9.json null ../Data/table_6_map/map_table.yaml points+objects table_reloc 0
+./bin/oa-slam Vocabulary/ORBvoc.txt Cameras/TUM2.yaml <rgb.txt | image folder | webcam_X> \
+    <detections .json | .onnx | .engine> null points+objects <output_name>
 ```
 
-Example to run OA-SLAM in **Localization** mode on an existing map of the scene *Sink* (pre-built from the image sequence *sink_13*):
-```
-./oa-slam_localization ../Vocabulary/ORBvoc.txt ../Cameras/MI9T_640x360_0.6.yaml ../Data/sink_18/frames/  ../Data/detections_yolov5_sink_18.json null ../Data/sink_13_map/map_sink.yaml points+objects sink_reloc 0
-```
-For both examples, you can check that relocalization fails when only points are used.
+### Benchmark scripts
 
+`scripts/run_benchmark_trt.sh` (repeated runs on the 12 TUM/Bonn sequences) and `scripts/run_ablation_trt.sh`
+(association ablation) are unchanged except for the method name: results go to
+`Results/repeat_experiment/OA-SLAM3-Yolov8nSegFP16` and `Results/ablations/OA-SLAM3-Yolov8nSegFP16_ablation`,
+next to the ORB-SLAM2 results (`OA-SLAM-Yolov8nSegFP16`). Set `METHOD=...` to change it.
 
+## Smoke test
 
-# Docker
+Single runs (Jetson, TensorRT FP16 engine, `points+objects`, viewer off), absolute trajectory error of
+`camera_poses_<name>_tum.txt` (`evo_ape tum -a`):
 
-You can build a docker image containing all you need to run OA-SLAM using ```Dockerfile```.
+| sequence | frames | ATE RMSE [m] `camera_poses` | ATE RMSE [m] `CameraTrajectory` | objects | ORB-SLAM2 version, 5 runs (ATE RMSE [m]) |
+|---|---|---|---|---|---|
+| fr3_walking_xyz | 827 | 0.018 | 0.019 | 4 | 0.068 – 0.258 |
+| fr3_walking_rpy | 866 | 0.068 | 0.038 | 1 | 0.039 – 0.114 |
+| fr2_desk_with_person | 3983 | 0.016 | 0.015 | 15 | 0.037 – 0.052 |
+| fr1_room | 1352 | 0.161 | 0.068 | 4 | 0.059 – 0.186 |
+| Bonn crowd | 927 | 0.041 | 0.021 | 0 | 0.044 – 0.058 |
 
-You may need to adapt the base image (```Dockerfile:1```) depending on your cuda drivers version.
+Mean FPS (detection + tracking): 13.3 – 16.2.
 
+These are single runs to check the port, not the benchmark (use `scripts/run_benchmark_trt.sh`).
 
-```nvidia-container-toolkit``` is needed:
-```
-curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
-curl -s -L https://nvidia.github.io/nvidia-docker/UBUNTU_VERSION/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+## License
 
-sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
-sudo systemctl restart docker
-```
+GPLv3, as OA-SLAM, ORB-SLAM2 and ORB-SLAM3 (see `LICENSE` and `LICENSE_ORB_SLAM3`).
 
-Replace ```UBUNTU_VERSION``` by your version (for example ```ubuntu18.04```).
-
-Build the image:
-```
-docker build -t oa-slam .
-```
-
-Run the docker:
-```
-sudo xhost +local:root && docker run --gpus all --rm -e DISPLAY=$DISPLAY -v path/to/folder/with/trained_yolov5_in_onnx:/data/ -v /tmp/.X11-unix:/tmp/.X11-unix -v /dev:/dev:ro --device=/dev/video4:/dev/video4 -it oa-slam 
-```
-
-Note that you need indicate a folder containing the trained weights for YOLOv5 detector in ONNX format. 
-Also, you might have to change the id of the video device.
-
-OA-SLAM executables are built in the folder ```/opt/OA-SLAM/bin```.
-
-
-
-
-# License
-
-OA-SLAM is released under a GPLv3 license. The code is based on [ORB-SLAM2](https://github.com/raulmur/ORB_SLAM2).
-
-
-
+- M. Zins, G. Simon, M.-O. Berger, *OA-SLAM: Leveraging Objects for Camera Relocalization in Visual SLAM*, ISMAR 2022.
+- C. Campos, R. Elvira, J. J. Gómez Rodríguez, J. M. M. Montiel, J. D. Tardós, *ORB-SLAM3: An Accurate
+  Open-Source Library for Visual, Visual-Inertial and Multi-Map SLAM*, IEEE T-RO 2021.

@@ -28,7 +28,7 @@
 #include "Utils.h"
 
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 struct Ellipse

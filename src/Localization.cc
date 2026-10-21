@@ -36,7 +36,7 @@
 #include "OptimizerObject.h"
 
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 std::pair<Mapping, Mapping> generate_possible_mappings(const std::vector<size_t> objects_category, const std::vector<size_t> detections_category)
@@ -286,9 +286,9 @@ solveP3P_ransac(const std::vector<Ellipsoid, Eigen::aligned_allocator<Ellipsoid>
 
 
 
-cv::Mat OptimizePoseFromObjects(const std::vector<Ellipse, Eigen::aligned_allocator<Ellipse>>& ellipses,
+Sophus::SE3f OptimizePoseFromObjects(const std::vector<Ellipse, Eigen::aligned_allocator<Ellipse>>& ellipses,
                                 const std::vector<Ellipsoid, Eigen::aligned_allocator<Ellipsoid>>& ellipsoids,
-                                cv::Mat Rt, const Eigen::Matrix3d& K)
+                                const Sophus::SE3f& Tcw, const Eigen::Matrix3d& K)
 {
 
     // Setup optimizer
@@ -307,7 +307,7 @@ cv::Mat OptimizePoseFromObjects(const std::vector<Ellipse, Eigen::aligned_alloca
 
 
     g2o::VertexSE3Expmap * vertex_cam = new g2o::VertexSE3Expmap();
-    vertex_cam->setEstimate(Converter::toSE3Quat(Rt));
+    vertex_cam->setEstimate(Converter::toSE3Quat(Tcw));
     vertex_cam->setId(0);
     optimizer.addVertex(vertex_cam);
 
@@ -324,7 +324,7 @@ cv::Mat OptimizePoseFromObjects(const std::vector<Ellipse, Eigen::aligned_alloca
     optimizer.optimize(50);
 
     g2o::SE3Quat SE3quat = vertex_cam->estimate();
-    return Converter::toCvMat(SE3quat);
+    return Sophus::SE3f(SE3quat.rotation().cast<float>(), SE3quat.translation().cast<float>());
 }
 
 }

@@ -14,7 +14,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="$HOME/Riset_SLAM/Dataset"
-METHOD="OA-SLAM-Yolov8nSegFP16"
+METHOD="${METHOD:-OA-SLAM3-Yolov8nSegFP16}"  # ORB-SLAM3 backbone (ORB-SLAM2 runs: OA-SLAM-Yolov8nSegFP16)
 RESULTS="${RESULTS:-$HOME/Riset_SLAM/Results/ablations/${METHOD}_ablation}"
 ENGINE="$ROOT/models/yolov8n-seg_fp16.engine"
 VIEWER="${VIEWER:-1}"
@@ -74,7 +74,7 @@ rm -f "$RESULTS/CAMPAIGN_DONE.txt"
     echo "repetitions  : $FIRST..$LAST"
     echo "cells        : ${CELLS[*]}"
     echo "engine       : $ENGINE ($(md5sum "$ENGINE" | cut -c1-32))"
-    echo "binary       : $(md5sum "$ROOT/bin/oa-slam_rgb-d-offline" | cut -c1-32), lib $(md5sum "$ROOT/lib/libORB_SLAM2.so" | cut -c1-32)"
+    echo "binary       : $(md5sum "$ROOT/bin/oa-slam_rgb-d-offline" | cut -c1-32), lib $(md5sum "$ROOT/lib/libOA_SLAM3.so" | cut -c1-32)"
     echo "power mode   : $(nvpmodel -q 2>/dev/null | head -1)"
     echo "jetpack      : $(head -1 /etc/nv_tegra_release)"
     echo "viewer       : $VIEWER"

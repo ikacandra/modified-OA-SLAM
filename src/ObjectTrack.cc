@@ -29,12 +29,12 @@
 
 #include "Reconstruction.h"
 
-namespace ORB_SLAM2 
+namespace ORB_SLAM3 
 {
 
 unsigned int ObjectTrack::factory_id = 0;
 int chair_count = 0;
-ObjectTrack::Ptr ObjectTrack::CreateNewObjectTrack(unsigned int cat, const BBox2& bbox, double score, const Matrix34d& Rt, unsigned int frame_idx, Tracking *tracker, KeyFrame *kf) {
+ObjectTrack::Ptr ObjectTrack::CreateNewObjectTrack(unsigned int cat, const BBox2& bbox, double score, const Matrix34d& Rt, unsigned int frame_idx, Tracking *tracker, KeyFrame *kf, Map* map) {
     ObjectTrack::Ptr obj = std::make_shared<ObjectTrack>();
     obj->id_ = factory_id++;
     obj->category_id_ = cat;
@@ -86,6 +86,7 @@ ObjectTrack::Ptr ObjectTrack::CreateNewObjectTrack(unsigned int cat, const BBox2
 
 
     obj->tracker_ = tracker;
+    obj->map_ = map;
     obj->status_ = ObjectTrackStatus::ONLY_2D;
     obj->unc_ = 0.5; // ===> depends on the variance of the reconstruction gaussian curve
     return obj;
@@ -107,10 +108,10 @@ bool ObjectTrack::ReconstructFromLandmarks(Map* map)
     std::vector<MapPoint*> points = map->GetAllMapPoints();
     Eigen::Matrix<double, 3, Eigen::Dynamic> pts(3, points.size());
     for(size_t j = 0; j < points.size(); j++) {
-            cv::Mat p = points[j]->GetWorldPos();
-            pts(0, j) = p.at<float>(0);
-            pts(1, j) = p.at<float>(1);
-            pts(2, j) = p.at<float>(2);
+            Eigen::Vector3f p = points[j]->GetWorldPos();
+            pts(0, j) = p(0);
+            pts(1, j) = p(1);
+            pts(2, j) = p(2);
     }
 
     std::vector<Matrix34d, Eigen::aligned_allocator<Matrix34d>> Rts = Rts_.to_vector();
@@ -212,9 +213,10 @@ void ObjectTrack::AddDetection(const BBox2& bbox, double score, const Matrix34d&
         keyframes_bboxes_[kf] = bbox;
         keyframes_scores_[kf] = score;
 
+        const std::vector<MapPoint*> kf_points = kf->GetMapPointMatches();
         std::unique_lock<std::mutex> lock(mutex_associated_map_points_);
-        for (size_t i = 0; i < kf->mvKeys.size(); ++i) {
-            MapPoint* p = kf->mvpMapPoints[i];
+        for (size_t i = 0; i < kf->mvKeys.size() && i < kf_points.size(); ++i) {
+            MapPoint* p = kf_points[i];
             if (p) {
                 auto kp = kf->mvKeys[i];
                 if (is_inside_bbox(kp.pt.x , kp.pt.y, bbox)) {
@@ -254,7 +256,7 @@ ObjectTrack::CopyDetectionsInKeyFrames()
                 continue;
             }
             bboxes.push_back(it.second);
-            poses.push_back(cvToEigenMatrix<double, float, 3, 4>(it.first->GetPose()));
+            poses.push_back(SE3ToRt(it.first->GetPose()));
             scores.push_back(keyframes_scores_[it.first]);
             ++i;
         }
@@ -636,8 +638,8 @@ void ObjectTrack::TryResetEllipsoidFromMaPoints()
         std::vector<Eigen::Vector3d> good_points;
         for (const auto& mp_cnt : associated_map_points_) {
             if (mp_cnt.second * 2 < keyframes_bboxes_.size()) {
-                cv::Mat p = mp_cnt.first->GetWorldPos();
-                Eigen::Vector3d pt(p.at<float>(0), p.at<float>(1), p.at<float>(2));
+                Eigen::Vector3f p = mp_cnt.first->GetWorldPos();
+                Eigen::Vector3d pt(p(0), p(1), p(2));
                 good_points.push_back(pt);
             }
         }
@@ -677,8 +679,8 @@ void ObjectTrack::TryResetEllipsoidFromMaPoints()
         Ellipsoid ell = map_object_->GetEllipsoid();
         for (auto* p : points)
         {
-            cv::Mat pos = p->GetWorldPos();
-            Eigen::Vector3d pt(pos.at<float>(0),pos.at<float>(1),pos.at<float>(2));
+            Eigen::Vector3f pos = p->GetWorldPos();
+            Eigen::Vector3d pt(pos(0),pos(1),pos(2));
             if (ell.IsInside(pt)) {
 
             }
@@ -700,8 +702,8 @@ void ObjectTrack::AssociatePointsInsideEllipsoid(Map* map)
     Ellipsoid ell = map_object_->GetEllipsoid();
     for (auto* p : points)
     {
-        cv::Mat pos = p->GetWorldPos();
-        Eigen::Vector3d pt(pos.at<float>(0),pos.at<float>(1),pos.at<float>(2));
+        Eigen::Vector3f pos = p->GetWorldPos();
+        Eigen::Vector3d pt(pos(0),pos(1),pos(2));
         if (ell.IsInside(pt)) {
             associated_map_points_[p] = nb_kf;
         }

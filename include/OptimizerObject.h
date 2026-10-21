@@ -40,7 +40,7 @@
 
 // #include <ceres/ceres.h>
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 Ellipsoid reconstruct_ellipsoid(const std::vector<Ellipse, Eigen::aligned_allocator<Ellipse>>& ellipses,

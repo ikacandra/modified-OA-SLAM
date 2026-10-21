@@ -21,7 +21,7 @@
 #include <vector>
 #include <ostream>
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
     
 template<class T, class Allocator = std::allocator<T>> 

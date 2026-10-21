@@ -39,6 +39,7 @@
 #include "Viewer.h"
 #include "ImuTypes.h"
 #include "Settings.h"
+#include "ImageDetections.h"
 
 
 namespace ORB_SLAM3
@@ -79,6 +80,14 @@ class Tracking;
 class LocalMapping;
 class LoopClosing;
 class Settings;
+class LocalObjectMapping;
+
+// [OA-SLAM] Relocalization when tracking is lost
+enum enumRelocalizationMode {
+    RELOC_POINTS,
+    RELOC_OBJECTS,
+    RELOC_OBJECTS_POINTS
+};
 
 class System
 {
@@ -102,7 +111,9 @@ public:
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     // Initialize the SLAM system. It launches the Local Mapping, Loop Closing and Viewer threads.
-    System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor, const bool bUseViewer = true, const int initFr = 0, const string &strSequence = std::string());
+    // [OA-SLAM] bUseObjectMapping: run the Local Object Mapping thread (object optimization and fusion)
+    System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor, const bool bUseViewer = true, const int initFr = 0, const string &strSequence = std::string(),
+           const bool bUseObjectMapping = true);
 
     // Proccess the given stereo frame. Images must be synchronized and rectified.
     // Input images: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
@@ -119,6 +130,16 @@ public:
     // Input images: RGB (CV_8UC3) or grayscale (CV_8U). RGB is converted to grayscale.
     // Returns the camera pose (empty if tracking fails).
     Sophus::SE3f TrackMonocular(const cv::Mat &im, const double &timestamp, const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
+
+    // [OA-SLAM] Same as above with the object detections of the frame.
+    // force_relocalize: only relocalize the frame (System::GetRelocalizationMode), no tracking.
+    // The pose is the identity when the frame could not be localized.
+    Sophus::SE3f TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const double &timestamp,
+                           const std::vector<Detection::Ptr>& detections, bool force_relocalize,
+                           const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
+    Sophus::SE3f TrackMonocular(const cv::Mat &im, const double &timestamp,
+                                const std::vector<Detection::Ptr>& detections, bool force_relocalize,
+                                const vector<IMU::Point>& vImuMeas = vector<IMU::Point>(), string filename="");
 
 
     // This stops local mapping thread (map building) and performs only camera tracking.
@@ -185,6 +206,36 @@ public:
     void ChangeDataset();
 
     float GetImageScale();
+
+    // ---------------- [OA-SLAM] ----------------
+    // Close the map viewer (it otherwise waits for the user to press Quit in Shutdown()).
+    // Call before Shutdown() for unattended runs.
+    void RequestViewerFinish();
+
+    // The user pressed Quit in the map viewer
+    bool ShouldQuit() const {
+        return mShouldQuit;
+    }
+
+    void SetRelocalizationMode(enumRelocalizationMode mode) {
+        reloc_mode_ = mode;
+    }
+
+    enumRelocalizationMode GetRelocalizationMode() const {
+        return reloc_mode_;
+    }
+
+    void SaveKeyFrameTrajectoryJSON(const string &filename, const std::vector<std::string>& frames_filenames);
+    void SaveMapPointsOBJ(const string &filename);
+    // Objects of all the maps of the Atlas
+    void SaveMapObjectsOBJ(const string& filename);
+    void SaveMapObjectsTXT(const std::string& filename);
+
+    // remove the n-th object of the category cat from the active map
+    void remove_nth_object_by_cat(int cat, int nth);
+
+    double relocalization_duration = -1;
+    bool relocalization_status = false;
 
 #ifdef REGISTER_TIMES
     void InsertRectTime(double& time);
@@ -262,6 +313,15 @@ private:
     string mStrVocabularyFilePath;
 
     Settings* settings_;
+
+    // [OA-SLAM]
+    LocalObjectMapping* local_object_mapper_ = nullptr;
+    std::thread* local_object_mapping_ = nullptr;
+    bool mShouldQuit = false;
+    enumRelocalizationMode reloc_mode_ = enumRelocalizationMode::RELOC_POINTS;
+
+    // Pause / Quit buttons of the viewer
+    void CheckViewerPauseQuit();
 };
 
 }// namespace ORB_SLAM

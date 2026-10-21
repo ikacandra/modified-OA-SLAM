@@ -21,7 +21,7 @@
 #include "ColorManager.h"
 
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 std::random_device RandomUniformColorGenerator::rd("default");

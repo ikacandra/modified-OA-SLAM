@@ -39,6 +39,11 @@
 
 #include "GeometricCamera.h"
 
+// [OA-SLAM]
+#include "ImageDetections.h"
+#include "ObjectTrack.h"
+#include "Utils.h"
+
 #include <mutex>
 #include <unordered_set>
 
@@ -52,6 +57,8 @@ class LocalMapping;
 class LoopClosing;
 class System;
 class Settings;
+class LocalObjectMapping;
+class Detection;
 
 class Tracking
 {  
@@ -70,13 +77,17 @@ public:
 
     // Preprocess the input and call Track(). Extract features and performs stereo matching.
     Sophus::SE3f GrabImageStereo(const cv::Mat &imRectLeft,const cv::Mat &imRectRight, const double &timestamp, string filename);
-    Sophus::SE3f GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, string filename);
-    Sophus::SE3f GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename);
+    // [OA-SLAM] detections of the frame; force_relocalize only relocalizes the frame (no tracking)
+    Sophus::SE3f GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, string filename,
+                               const std::vector<Detection::Ptr>& detections = {}, bool force_relocalize = false);
+    Sophus::SE3f GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename,
+                                    const std::vector<Detection::Ptr>& detections = {}, bool force_relocalize = false);
 
     void GrabImuData(const IMU::Point &imuMeasurement);
 
     void SetLocalMapper(LocalMapping* pLocalMapper);
     void SetLoopClosing(LoopClosing* pLoopClosing);
+    void SetLocalObjectMapper(LocalObjectMapping* pLocalObjectMapper);
     void SetViewer(Viewer* pViewer);
     void SetStepByStep(bool bSet);
     bool GetStepByStep();
@@ -174,6 +185,44 @@ public:
 
     vector<MapPoint*> GetLocalMapMPS();
 
+    // ---------------- [OA-SLAM] objects ----------------
+    const System* GetSystem() const {
+        return mpSystem;
+    }
+
+    Atlas* GetAtlas() const {
+        return mpAtlas;
+    }
+
+    const std::list<ObjectTrack::Ptr>& GetObjectTracks() {
+        return objectTracks_;
+    }
+
+    unsigned int GetCurrentFrameIdx() const {
+        return current_frame_idx_;
+    }
+
+    Eigen::Matrix3d GetK() const {
+        return K_;
+    }
+
+    void RemoveTrack(ObjectTrack::Ptr track);
+
+    std::vector<Detection::Ptr> GetCurrentFrameDetections() {
+        return current_frame_detections_;
+    }
+
+    std::vector<Detection::Ptr> GetCurrentFrameGoodDetections() {
+        return current_frame_good_detections_;
+    }
+
+    double GetCurrentMeanDepth() const {
+        return current_mean_depth_;
+    }
+
+    // RGB image of the current frame (for the frame drawer)
+    cv::Mat im_rgb_;
+
     bool mbWriteStats;
 
 #ifdef REGISTER_TIMES
@@ -212,6 +261,18 @@ protected:
     bool PredictStateIMU();
 
     bool Relocalization();
+
+    // [OA-SLAM]
+    bool RelocalizationFromObjects(bool use_points);
+    // Relocalization with points, objects or both (System::GetRelocalizationMode)
+    bool RelocalizationWithMode();
+    void ForceRelocalization();
+    // Person masks (dynamic, keypoints discarded) and static object masks from the detections
+    void PrepareDetections(const std::vector<Detection::Ptr>& detections, const cv::Size& im_size,
+                           cv::Mat& dynamic_mask, cv::Mat& static_object_mask);
+    void SetFrameSemantics(const cv::Mat& static_object_mask);
+    // Associate the detections to the object tracks, reconstruct and insert the objects in the map
+    void TrackObjects(const cv::Mat& im);
 
     void UpdateLocalMap();
     void UpdateLocalPoints();
@@ -285,6 +346,16 @@ protected:
 
     //Atlas
     Atlas* mpAtlas;
+
+    // [OA-SLAM]
+    LocalObjectMapping* local_object_mapper_ = nullptr;
+    Eigen::Matrix3d K_ = Eigen::Matrix3d::Identity();
+    std::list<ObjectTrack::Ptr> objectTracks_;
+    size_t current_frame_idx_ = 0;
+    bool createdNewKeyFrame_ = false;
+    std::vector<Detection::Ptr> current_frame_detections_;
+    std::vector<Detection::Ptr> current_frame_good_detections_;
+    double current_mean_depth_ = 0.0;
 
     //Calibration matrix
     cv::Mat mK;

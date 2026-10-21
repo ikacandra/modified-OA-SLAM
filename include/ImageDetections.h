@@ -35,7 +35,7 @@ using json = nlohmann::json;
 #include <opencv2/dnn.hpp>
 
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 class Detection

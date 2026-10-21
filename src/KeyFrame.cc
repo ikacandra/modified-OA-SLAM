@@ -574,7 +574,9 @@ void KeyFrame::SetBadFlag()
 {
     {
         unique_lock<mutex> lock(mMutexConnections);
-        if(mnId==mpMap->GetInitKFid())
+        // A keyframe that never got a covisibility connection has no parent in the
+        // spanning tree (mpParent == NULL): culling it would dereference NULL below.
+        if(mnId==mpMap->GetInitKFid() || !mpParent)
         {
             return;
         }
@@ -675,7 +677,14 @@ void KeyFrame::SetBadFlag()
 
 
     mpMap->EraseKeyFrame(this);
+    mpMap->RemoveKeyFrameFromObjects(this);
     mpKeyFrameDB->erase(this);
+}
+
+bool KeyFrame::isToBeErased()
+{
+    unique_lock<mutex> lock(mMutexConnections);
+    return mbToBeErased;
 }
 
 bool KeyFrame::isBad()

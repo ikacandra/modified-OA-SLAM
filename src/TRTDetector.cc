@@ -12,7 +12,7 @@
 #include <iterator>
 #include <stdexcept>
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 namespace

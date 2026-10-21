@@ -83,7 +83,7 @@ def main():
             lines.append(f"| **{gname} mean** | {len(gseqs)} seq | " + " | ".join(cells) + " |")
         return "\n".join(lines) + "\n"
 
-    md = ["# OA-SLAM-InstanceSeg + YOLOv8n-seg TensorRT FP16 (640) — repeated runs", "",
+    md = ["# OA-SLAM (ORB-SLAM3 backbone) + YOLOv8n-seg TensorRT FP16 (640) — repeated runs", "",
           "Values: mean ± sample std over the complete runs of each sequence. "
           "Group rows: mean ± std of the per-sequence means.", "",
           table("Computation cost", COST), table("Accuracy (evo, SE(3) alignment; RPE delta = 1 frame)", ACC),

@@ -19,6 +19,10 @@
 
 #include "LoopClosing.h"
 
+#include "MapObject.h"
+#include "ObjectTrack.h"
+#include "Ellipsoid.h"
+
 #include "Sim3Solver.h"
 #include "Converter.h"
 #include "Optimizer.h"
@@ -982,7 +986,7 @@ void LoopClosing::CorrectLoop()
         unique_lock<mutex> lock(mMutexGBA);
         mbStopGBA = true;
 
-        mnFullBAIdx++;
+        mnFullBAIdx = true; // ++ on a bool (ORB-SLAM3), not allowed in C++17
 
         if(mpThreadGBA)
         {
@@ -1233,7 +1237,7 @@ void LoopClosing::MergeLocal()
         unique_lock<mutex> lock(mMutexGBA);
         mbStopGBA = true;
 
-        mnFullBAIdx++;
+        mnFullBAIdx = true; // ++ on a bool (ORB-SLAM3), not allowed in C++17
 
         if(mpThreadGBA)
         {
@@ -1547,6 +1551,23 @@ void LoopClosing::MergeLocal()
             pCurrentMap->EraseMapPoint(pMPi);
         }
 
+        // [OA-SLAM] Move the objects of the current map into the merged map. Every point of the
+        // current map is mapped by the same similarity: S_merge_cur = Smw_merge * Scw_current
+        {
+            const g2o::Sim3 S_merge_cur = mg2oMergeScw.inverse() * g2oNonCorrectedScw;
+            Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+            T.block<3,3>(0,0) = S_merge_cur.scale() * S_merge_cur.rotation().toRotationMatrix();
+            T.block<3,1>(0,3) = S_merge_cur.translation();
+            for(MapObject* pObj : pCurrentMap->GetAllMapObjects())
+            {
+                // the dual quadric is transformed as Q' = T Q T^t
+                pObj->SetEllipsoid(Ellipsoid::FromDual(T * pObj->GetEllipsoid().AsDual() * T.transpose()));
+                pObj->GetTrack()->SetMap(pMergeMap);
+                pMergeMap->AddMapObject(pObj);
+                pCurrentMap->EraseMapObject(pObj);
+            }
+        }
+
         mpAtlas->ChangeMap(pMergeMap);
         mpAtlas->SetMapBad(pCurrentMap);
         pMergeMap->IncreaseChangeIndex();
@@ -1806,7 +1827,7 @@ void LoopClosing::MergeLocal2()
         unique_lock<mutex> lock(mMutexGBA);
         mbStopGBA = true;
 
-        mnFullBAIdx++;
+        mnFullBAIdx = true; // ++ on a bool (ORB-SLAM3), not allowed in C++17
 
         if(mpThreadGBA)
         {

@@ -27,8 +27,8 @@
 #include<opencv2/core/core.hpp>
 
 #include <ImageDetections.h>
+#include <TRTDetector.h>
 #include <System.h>
-#include "Osmap.h"
 #include <nlohmann/json.hpp>
 #include <experimental/filesystem>
 #include "Utils.h"
@@ -56,7 +56,7 @@ int main(int argc, char **argv)
                         "      vocabulary_file\n"
                         "      camera_file\n"
                         "      path_to_image_sequence (.txt file listing the images or a folder with rgb.txt or 'webcam_id')\n"
-                        "      detections_file (.json file with detections or .onnx yolov5 weights)\n"
+                        "      detections_file (.json file with detections, .onnx or TensorRT .engine yolov8-seg model)\n"
                         "      categories_to_ignore_file (file containing the categories to ignore (one category_id per line))\n"
                         "      relocalization_mode ('points', 'objects' or 'points+objects')\n"
                         "      output_name \n";
@@ -115,28 +115,36 @@ int main(int argc, char **argv)
 
     // Load object detections
     auto extension = get_file_extension(detections_file);
-    std::shared_ptr<ORB_SLAM2::ImageDetectionsManager> detector = nullptr;
+    std::shared_ptr<ORB_SLAM3::ImageDetectionsManager> detector = nullptr;
     bool detect_from_file = false;
     if (extension == "onnx") { // load network
-        detector = std::make_shared<ORB_SLAM2::ObjectDetector>(detections_file, classes_to_ignore);
+        detector = std::make_shared<ORB_SLAM3::ObjectDetector>(detections_file, classes_to_ignore);
         detect_from_file = false;
+    } else if (extension == "engine") { // TensorRT engine
+#ifdef USE_TENSORRT
+        detector = std::make_shared<ORB_SLAM3::TRTDetector>(detections_file, classes_to_ignore);
+        detect_from_file = false;
+#else
+        std::cerr << "This build has no TensorRT support; .engine models cannot be used.\n";
+        return 1;
+#endif
     } else if (extension == "json") { // load from external detections file
-        detector = std::make_shared<ORB_SLAM2::DetectionsFromFile>(detections_file, classes_to_ignore);
+        detector = std::make_shared<ORB_SLAM3::DetectionsFromFile>(detections_file, classes_to_ignore);
         detect_from_file = true;
     } else {
-        std::cout << "Invalid detection file. It should be .json or .onnx\n"
+        std::cout << "Invalid detection file. It should be .json, .onnx or .engine\n"
                       "No detections will be obtained.\n";
     }
 
 
     // Relocalization mode
-    ORB_SLAM2::enumRelocalizationMode relocalization_mode = ORB_SLAM2::RELOC_POINTS;
+    ORB_SLAM3::enumRelocalizationMode relocalization_mode = ORB_SLAM3::RELOC_POINTS;
     if (reloc_mode == string("points"))
-        relocalization_mode = ORB_SLAM2::RELOC_POINTS;
+        relocalization_mode = ORB_SLAM3::RELOC_POINTS;
     else if (reloc_mode == std::string("objects"))
-        relocalization_mode = ORB_SLAM2::RELOC_OBJECTS;
+        relocalization_mode = ORB_SLAM3::RELOC_OBJECTS;
     else if (reloc_mode == std::string("points+objects"))
-        relocalization_mode = ORB_SLAM2::RELOC_OBJECTS_POINTS;
+        relocalization_mode = ORB_SLAM3::RELOC_OBJECTS_POINTS;
     else {
         std::cerr << "Error: Invalid parameter for relocalization mode. "
                      "It should be 'points', 'objects' or 'points+objects'.\n";
@@ -164,7 +172,7 @@ int main(int argc, char **argv)
     }
 
     // Create system
-    ORB_SLAM2::System SLAM(vocabulary_file, parameters_file, ORB_SLAM2::System::MONOCULAR, true, false, false);
+    ORB_SLAM3::System SLAM(vocabulary_file, parameters_file, ORB_SLAM3::System::MONOCULAR, true);
     SLAM.SetRelocalizationMode(relocalization_mode);
 
     // Vector for tracking time statistics
@@ -174,8 +182,6 @@ int main(int argc, char **argv)
     cout << endl << "-------" << endl;
     cout << "Start processing sequence ..." << endl;
     cout << "Images in the sequence: " << nImages << endl << endl;
-
-    ORB_SLAM2::Osmap osmap = ORB_SLAM2::Osmap(SLAM);
 
     // Main loop
     cv::Mat im;
@@ -210,7 +216,7 @@ int main(int argc, char **argv)
         filenames.push_back(filename);
 
         // Get object detections
-        std::vector<ORB_SLAM2::Detection::Ptr> detections;
+        std::vector<ORB_SLAM3::Detection::Ptr> detections;
         if (detector) {
             if (detect_from_file)
                 detections = detector->detect(filename); // from detections file
@@ -219,12 +225,9 @@ int main(int argc, char **argv)
         }
 
         // Pass the image and detections to the SLAM system
-        cv::Mat m = SLAM.TrackMonocular(im, tframe, detections, false);
-
-        if (m.rows && m.cols)
-            poses.push_back(ORB_SLAM2::cvToEigenMatrix<double, float, 4, 4>(m));
-        else
-            poses.push_back(Eigen::Matrix4d::Identity());
+        // [ORB-SLAM3] Tcw is the identity when the frame could not be localized
+        Sophus::SE3f Tcw = SLAM.TrackMonocular(im, tframe, detections, false);
+        poses.push_back(Tcw.matrix().cast<double>());
 
         std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
         double ttrack = std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count();
@@ -303,9 +306,6 @@ int main(int argc, char **argv)
     SLAM.SaveMapObjectsOBJ(output_folder + "map_objects_" + output_name + ".obj");
     SLAM.SaveMapObjectsTXT(output_folder + "map_objects_" + output_name + ".txt");
     std::cout << "\n";
-
-    // Save a reloadable map
-    osmap.mapSave(output_folder + "map_" + output_name);
 
     return 0;
 }

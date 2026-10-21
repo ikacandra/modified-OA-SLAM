@@ -23,7 +23,7 @@
 #include <fstream>
 #include <iomanip>
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 void writeOBJ(const std::string& filename, const Eigen::Matrix<double, Eigen::Dynamic, 3>& pts,

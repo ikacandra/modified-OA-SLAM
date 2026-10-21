@@ -22,7 +22,7 @@
 #include "ObjectTrack.h"
 
 
-namespace ORB_SLAM2 
+namespace ORB_SLAM3 
 {
     bool MapObject::Merge(MapObject* obj) {
         // do something with the ellipsoid

@@ -21,6 +21,9 @@
 
 #include<mutex>
 
+#include "MapObject.h"
+#include "ObjectTrack.h"
+
 namespace ORB_SLAM3
 {
 
@@ -225,6 +228,7 @@ void Map::clear()
 
     mspMapPoints.clear();
     mspKeyFrames.clear();
+    map_objects_.clear();
     mnMaxKFid = mnInitKFid;
     mbImuInitialized = false;
     mvpReferenceMapPoints.clear();
@@ -490,5 +494,35 @@ void Map::PostLoad(KeyFrameDatabase* pKFDB, ORBVocabulary* pORBVoc/*, map<long u
     mvpBackupMapPoints.clear();
 }
 
+
+void Map::AddMapObject(MapObject *obj)
+{
+    unique_lock<mutex> lock(mMutexMap);
+    map_objects_.insert(obj);
+}
+
+void Map::EraseMapObject(MapObject *obj)
+{
+    unique_lock<mutex> lock(mMutexMap);
+    map_objects_.erase(obj);
+}
+
+vector<MapObject*> Map::GetAllMapObjects()
+{
+    unique_lock<mutex> lock(mMutexMap);
+    return vector<MapObject*>(map_objects_.begin(), map_objects_.end());
+}
+
+size_t Map::GetNumberMapObjects()
+{
+    unique_lock<mutex> lock(mMutexMap);
+    return map_objects_.size();
+}
+
+void Map::RemoveKeyFrameFromObjects(KeyFrame* pKF)
+{
+    for (auto* obj : GetAllMapObjects())
+        obj->RemoveKeyFrameObservation(pKF);
+}
 
 } //namespace ORB_SLAM3

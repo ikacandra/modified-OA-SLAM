@@ -17,7 +17,7 @@
 #include <cuda_runtime_api.h>
 #endif
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 #ifdef USE_TENSORRT

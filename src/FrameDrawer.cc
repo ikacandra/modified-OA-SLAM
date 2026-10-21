@@ -23,6 +23,11 @@
 #include <opencv2/highgui/highgui.hpp>
 
 #include<mutex>
+#include <iomanip>
+
+#include "MapObject.h"
+#include "ObjectTrack.h"
+#include "ColorManager.h"
 
 namespace ORB_SLAM3
 {
@@ -43,6 +48,7 @@ cv::Mat FrameDrawer::DrawFrame(float imageScale)
     vector<bool> vbVO, vbMap; // Tracked MapPoints in current frame
     vector<pair<cv::Point2f, cv::Point2f> > vTracks;
     int state; // Tracking state
+    vector<cv::Rect> vAprilTagBboxes;
     vector<float> vCurrentDepth;
     float thDepth;
 
@@ -91,6 +97,7 @@ cv::Mat FrameDrawer::DrawFrame(float imageScale)
 
             vCurrentDepth = mvCurrentDepth;
             thDepth = mThDepth;
+            vAprilTagBboxes = mvAprilTagBboxes;
 
         }
         else if(mState==Tracking::LOST)
@@ -114,7 +121,7 @@ cv::Mat FrameDrawer::DrawFrame(float imageScale)
     {
         for(unsigned int i=0; i<vMatches.size(); i++)
         {
-            if(vMatches[i]>=0)
+            if(vMatches[i]>=0 && i < vIniKeys.size() && vMatches[i] < static_cast<int>(vCurrentKeys.size()))
             {
                 cv::Point2f pt1,pt2;
                 if(imageScale != 1.f)
@@ -153,6 +160,18 @@ cv::Mat FrameDrawer::DrawFrame(float imageScale)
         mnTrackedVO=0;
         const float r = 5;
         int n = vCurrentKeys.size();
+
+        // [OA-SLAM] keypoints inside an AprilTag bbox are drawn in red
+        const cv::Scalar aprilTagColor(0,0,255);
+        auto isInsideAprilTagBbox = [&](const cv::Point2f& pt) -> bool {
+            for (const auto& bbox : vAprilTagBboxes) {
+                if (pt.x >= bbox.x && pt.x <= bbox.x + bbox.width &&
+                    pt.y >= bbox.y && pt.y <= bbox.y + bbox.height) {
+                    return true;
+                }
+            }
+            return false;
+        };
         for(int i=0;i<n;i++)
         {
             if(vbVO[i] || vbMap[i])
@@ -178,8 +197,14 @@ cv::Mat FrameDrawer::DrawFrame(float imageScale)
                     pt2.y=vCurrentKeys[i].pt.y+r;
                 }
 
+                if (!vAprilTagBboxes.empty() && isInsideAprilTagBbox(vCurrentKeys[i].pt))
+                {
+                    cv::rectangle(im,pt1,pt2,aprilTagColor);
+                    cv::circle(im,point,2,aprilTagColor,-1);
+                    mnTracked++;
+                }
                 // This is a match to a MapPoint in the map
-                if(vbMap[i])
+                else if(vbMap[i])
                 {
                     cv::rectangle(im,pt1,pt2,standardColor);
                     cv::circle(im,point,2,standardColor,-1);
@@ -347,6 +372,7 @@ void FrameDrawer::DrawTextInfo(cv::Mat &im, int nState, cv::Mat &imText)
         s << "Maps: " << nMaps << ", KFs: " << nKFs << ", MPs: " << nMPs << ", Matches: " << mnTracked;
         if(mnTrackedVO>0)
             s << ", + VO matches: " << mnTrackedVO;
+        s << " | FRAME " << frame_id_;
     }
     else if(nState==Tracking::LOST)
     {
@@ -370,7 +396,10 @@ void FrameDrawer::DrawTextInfo(cv::Mat &im, int nState, cv::Mat &imText)
 void FrameDrawer::Update(Tracking *pTracker)
 {
     unique_lock<mutex> lock(mMutex);
-    pTracker->mImGray.copyTo(mIm);
+    // [OA-SLAM] color image, so that the detections and objects are visible
+    pTracker->im_rgb_.copyTo(mIm);
+    frame_id_ = pTracker->GetCurrentFrameIdx();
+    mvAprilTagBboxes = pTracker->mCurrentFrame.mvAprilTagBboxes;
     mvCurrentKeys=pTracker->mCurrentFrame.mvKeys;
     mThDepth = pTracker->mCurrentFrame.mThDepth;
     mvCurrentDepth = pTracker->mCurrentFrame.mvDepth;
@@ -434,6 +463,116 @@ void FrameDrawer::Update(Tracking *pTracker)
 
     }
     mState=static_cast<int>(pTracker->mLastProcessedState);
+
+    // [OA-SLAM] detections, object tracks and projections of the objects
+    auto tracks = pTracker->GetObjectTracks();
+    detections_widgets_.clear();
+
+    const auto& detections = pTracker->GetCurrentFrameDetections();
+    for (auto det : detections) {
+        detections_widgets_.push_back(DetectionWidget(det->bbox, 0, det->category_id,
+                                        det->score, cv::Scalar(0, 0, 0),
+                                        2, false));
+    }
+    auto current_frame_id = pTracker->GetCurrentFrameIdx();
+    for (auto tr : tracks) {
+        if (current_frame_id == tr->GetLastObsFrameId()) {
+            auto bb = tr->GetLastBbox();
+            detections_widgets_.push_back(DetectionWidget(bb, tr->GetId(), tr->GetCategoryId(),
+                                                          tr->GetLastObsScore(), tr->GetColor(),
+                                                          3, true));
+        }
+    }
+
+    object_projections_widgets_.clear();
+    if (pTracker->mCurrentFrame.HasPose()) {
+        Eigen::Matrix<double, 3, 4> P = pTracker->GetK() * SE3ToRt(pTracker->mCurrentFrame.GetPose());
+        Map* pMap = mpAtlas->GetCurrentMap();
+        for (auto& tr : tracks) {
+            const auto* obj = tr->GetMapObject();
+            if (obj && tr->GetMap() == pMap) {
+                auto proj = obj->GetEllipsoid().project(P);
+                object_projections_widgets_.push_back(ObjectProjectionWidget(proj, tr->GetId(),
+                                                                             tr->GetCategoryId(), tr->GetColor(),
+                                                                             tr->GetStatus() == ObjectTrackStatus::IN_MAP,
+                                                                             tr->unc_));
+            }
+        }
+    }
+}
+
+cv::Mat FrameDrawer::DrawDetections(cv::Mat img)
+{
+    std::vector<DetectionWidget, Eigen::aligned_allocator<DetectionWidget>> detections;
+    {
+        unique_lock<mutex> lock(mMutex);
+        detections = detections_widgets_;
+    }
+    const auto& manager = CategoryColorsManager::GetInstance();
+    cv::Scalar color;
+    for (auto d : detections) {
+        const auto& bb = d.bbox;
+        if (use_category_cols_) {
+            color = manager[d.category_id];
+        } else {
+            color = d.color;
+        }
+        cv::rectangle(img, cv::Point2i(bb[0], bb[1]),
+                           cv::Point2i(bb[2], bb[3]),
+                           color,
+                           d.thickness);
+        if (d.display_info) {
+            std::stringstream ss;
+            ss << std::fixed << std::setprecision(2) << d.score;
+            cv::putText(img, std::to_string(d.id) + "|" + ss.str() + "|" + std::to_string(d.category_id),
+                        cv::Point2i(bb[0]-10, bb[1]-5), cv::FONT_HERSHEY_DUPLEX,
+                        0.55, cv::Scalar(255, 255, 255), 1, false);
+        }
+    }
+    return img;
+}
+
+static void draw_ellipse_dashed(cv::Mat img, const Ellipse& ell, const cv::Scalar& color, int thickness)
+{
+    int size = 8;
+    int space = 16;
+    const auto& c = ell.GetCenter();
+    const auto& axes = ell.GetAxes();
+    double angle = ell.GetAngle();
+    for (int i = 0; i < 360; i += space) {
+        cv::ellipse(img, cv::Point2f(c[0], c[1]), cv::Size2f(axes[0], axes[1]),
+                    TO_DEG(angle), i, i+size, color, thickness);
+    }
+}
+
+cv::Mat FrameDrawer::DrawProjections(cv::Mat img)
+{
+    std::vector<ObjectProjectionWidget, Eigen::aligned_allocator<ObjectProjectionWidget>> projections;
+    {
+        unique_lock<mutex> lock(mMutex);
+        projections = object_projections_widgets_;
+    }
+
+    const auto& manager= CategoryColorsManager::GetInstance();
+    cv::Scalar color;
+    for (auto w : projections)
+    {
+        const auto& ell = w.ellipse;
+        const auto& c = ell.GetCenter();
+        const auto& axes = ell.GetAxes();
+        double angle = ell.GetAngle();
+        if (use_category_cols_) {
+            color = manager[w.category_id];
+        } else {
+            color = w.color;
+        }
+        if (w.in_map)
+            cv::ellipse(img, cv::Point2f(c[0], c[1]), cv::Size2f(axes[0], axes[1]), TO_DEG(angle), 0, 360, color, 2);
+        else
+            draw_ellipse_dashed(img, ell, color, 2);
+    }
+
+    return img;
 }
 
 } //namespace ORB_SLAM

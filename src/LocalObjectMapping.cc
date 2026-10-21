@@ -32,13 +32,13 @@
 #include "MapObject.h"
 
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
-LocalObjectMapping::LocalObjectMapping(Map *pMap, Tracking *tracker):
+LocalObjectMapping::LocalObjectMapping(Tracking *tracker):
     mbResetRequested(false), mbFinishRequested(false), mbFinished(true),
     mbAbortBA(false), mbStopped(false), mbStopRequested(false), mbNotStop(false),
-    mpMap(pMap), tracker_(tracker)
+    tracker_(tracker)
 {
 }
 
@@ -60,9 +60,13 @@ void LocalObjectMapping::Run()
         // For now LocalObjectMapping always accept newly modified objects
 
         // while ... do reconstruction
-        while (!modified_objects_.empty()) {
+        while (CheckModifiedObjects()) {
 
-            MapObject *obj = modified_objects_.front();
+            MapObject *obj;
+            {
+                std::unique_lock<std::mutex> lock(mMutexNewKFs);
+                obj = modified_objects_.front();
+            }
 
             // obj->GetTrack()->TryResetEllipsoidFromMaPoints();
             // obj->GetTrack()->AssociatePointsInsideEllipsoid(mpMap);
@@ -75,7 +79,8 @@ void LocalObjectMapping::Run()
             auto cat = obj->GetTrack()->GetCategoryId();
 
             // Check objects fusion
-            const std::vector<MapObject*>& map_objects = mpMap->GetAllMapObjects();
+            // [ORB-SLAM3] only objects of the same Atlas map can be fused
+            const std::vector<MapObject*> map_objects = obj->GetTrack()->GetMap()->GetAllMapObjects();
             auto pts = obj->GetTrack()->GetFilteredAssociatedMapPoints(10);
             for (auto* obj2 : map_objects)
             {
@@ -290,6 +295,12 @@ void LocalObjectMapping::ResetIfRequested()
     {
         mlNewKeyFrames.clear();
         mlpRecentAddedMapPoints.clear();
+        {
+            // the objects are freed by the tracker after the reset
+            unique_lock<mutex> lock2(mMutexNewKFs);
+            modified_objects_ = decltype(modified_objects_)();
+            modified_objects_set_.clear();
+        }
         mbResetRequested=false;
     }
 }

@@ -51,7 +51,7 @@
 static const size_t max_frames_history = 50;
 
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 class Tracking;
@@ -69,7 +69,7 @@ public:
     typedef std::shared_ptr<ObjectTrack> Ptr;
     static unsigned int factory_id;
 
-    static ObjectTrack::Ptr CreateNewObjectTrack(unsigned int cat, const BBox2& bbox, double score, const Matrix34d& Rt, unsigned int frame_idx, Tracking *tracker, KeyFrame *kf);
+    static ObjectTrack::Ptr CreateNewObjectTrack(unsigned int cat, const BBox2& bbox, double score, const Matrix34d& Rt, unsigned int frame_idx, Tracking *tracker, KeyFrame *kf, Map* map);
 
     bool ReconstructFromLandmarks(Map* map);
     bool ReconstructCrocco(bool use_two_passes=true);
@@ -172,8 +172,21 @@ public:
     void UnMerge(ObjectTrack *track);
 
     void InsertInMap(Map *map) {
+        SetMap(map);
         map->AddMapObject(map_object_.get());
         status_ = ObjectTrackStatus::IN_MAP;
+    }
+
+    // [ORB-SLAM3] Atlas map the track belongs to. It changes when LoopClosing merges
+    // the active map into an older one.
+    Map* GetMap() const {
+        std::unique_lock<std::mutex> lock(mutex_map_);
+        return map_;
+    }
+
+    void SetMap(Map* map) {
+        std::unique_lock<std::mutex> lock(mutex_map_);
+        map_ = map;
     }
 
     void ClearTrackingBuffers() {
@@ -219,8 +232,8 @@ public:
         if (map_object_) {
             const auto& ellipsoid = map_object_->GetEllipsoid();
             for (auto mp_cnt : associated_map_points_) {
-                cv::Mat p = mp_cnt.first->GetWorldPos();
-                Eigen::Vector3d pos(p.at<float>(0), p.at<float>(1), p.at<float>(2));
+                Eigen::Vector3f p = mp_cnt.first->GetWorldPos();
+                Eigen::Vector3d pos(p(0), p(1), p(2));
                 if (ellipsoid.IsInside(pos))
                     filtered[mp_cnt.first] = mp_cnt.second;
             }
@@ -239,6 +252,8 @@ public:
     cv::Scalar color_;
     std::unique_ptr<MapObject> map_object_ = nullptr;
     Tracking* tracker_ = nullptr;
+    Map* map_ = nullptr;
+    mutable std::mutex mutex_map_;
 
     RingBuffer<BBox2, Eigen::aligned_allocator<BBox2>> bboxes_ = RingBuffer<BBox2, Eigen::aligned_allocator<BBox2>>(max_frames_history);
     RingBuffer<Matrix34d, Eigen::aligned_allocator<Matrix34d>> Rts_ = RingBuffer<Matrix34d, Eigen::aligned_allocator<Matrix34d>>(max_frames_history);

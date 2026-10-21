@@ -29,7 +29,7 @@
 namespace fs = std::experimental::filesystem;
 
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 // ================= HELPER FUNCTION FOR MASK GENERATION =================

@@ -556,7 +556,13 @@ namespace ORB_SLAM3
                                                          const int &maxX, const int &minY, const int &maxY, const int &N, const int &level)
     {
         // Compute how many initial nodes
-        const int nIni = round(static_cast<float>(maxX-minX)/(maxY-minY));
+        int dX = maxX - minX;
+        int dY = maxY - minY;
+
+        int nIni = round(static_cast<float>(dX) / dY);
+        if (dY > dX)
+            nIni = round(static_cast<float>(dY) / dX);
+        nIni = max(1, nIni);
 
         const float hX = static_cast<float>(maxX-minX)/nIni;
 
@@ -1099,6 +1105,37 @@ namespace ORB_SLAM3
         vector < vector<KeyPoint> > allKeypoints;
         ComputeKeyPointsOctTree(allKeypoints);
         //ComputeKeyPointsOld(allKeypoints);
+
+        // [OA-SLAM] Filter keypoints using the mask of dynamic objects:
+        // a keypoint is discarded if the mask pixel under it is > 0.
+        if (!_mask.empty())
+        {
+            Mat mask = _mask.getMat();
+            if (mask.type() == CV_8UC1)
+            {
+                for (int level = 0; level < nlevels; ++level)
+                {
+                    vector<KeyPoint>& keypoints = allKeypoints[level];
+                    vector<KeyPoint> good_keypoints;
+                    good_keypoints.reserve(keypoints.size());
+
+                    float scale = mvScaleFactor[level];
+
+                    for (size_t i = 0; i < keypoints.size(); ++i)
+                    {
+                        const KeyPoint& kp = keypoints[i];
+                        // Map coordinate to original image level
+                        int x = cvRound(kp.pt.x * scale);
+                        int y = cvRound(kp.pt.y * scale);
+
+                        if (x < 0 || x >= mask.cols || y < 0 || y >= mask.rows ||
+                            mask.at<unsigned char>(y, x) == 0)
+                            good_keypoints.push_back(kp);
+                    }
+                    keypoints = good_keypoints;
+                }
+            }
+        }
 
         Mat descriptors;
 

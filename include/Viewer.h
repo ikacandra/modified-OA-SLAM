@@ -61,6 +61,10 @@ public:
 
     void Release();
 
+    // [OA-SLAM] "Pause" and "Quit" buttons of the map viewer
+    bool isPaused();
+    bool CheckFinish();
+
     //void SetTrackingPause();
 
     bool both;
@@ -82,7 +86,6 @@ private:
 
     float mViewpointX, mViewpointY, mViewpointZ, mViewpointF;
 
-    bool CheckFinish();
     void SetFinish();
     bool mbFinishRequested;
     bool mbFinished;
@@ -93,6 +96,8 @@ private:
     std::mutex mMutexStop;
 
     bool mbStopTrack;
+
+    bool mbPaused = false;
 
 };
 

@@ -30,7 +30,7 @@
 #include "Utils.h"
 
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 double gaussian_wasserstein_2d(const Ellipse& ell1, const Ellipse& ell2);

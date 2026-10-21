@@ -21,6 +21,11 @@
 #include "KeyFrame.h"
 #include <pangolin/pangolin.h>
 #include <mutex>
+#include <unordered_set>
+
+#include "MapObject.h"
+#include "ObjectTrack.h"
+#include "ColorManager.h"
 
 namespace ORB_SLAM3
 {
@@ -132,7 +137,7 @@ bool MapDrawer::ParseViewerParamFile(cv::FileStorage &fSettings)
     return !b_miss_params;
 }
 
-void MapDrawer::DrawMapPoints()
+void MapDrawer::DrawMapPoints(double size, bool ignore_objects_points)
 {
     Map* pActiveMap = mpAtlas->GetCurrentMap();
     if(!pActiveMap)
@@ -146,26 +151,34 @@ void MapDrawer::DrawMapPoints()
     if(vpMPs.empty())
         return;
 
-    glPointSize(mPointSize);
+    std::unordered_set<MapPoint*> associated;
+    if (ignore_objects_points) {
+        for (auto* obj : pActiveMap->GetAllMapObjects()) {
+            for (const auto& pt_cnt : obj->GetTrack()->GetFilteredAssociatedMapPoints(10))
+                associated.insert(pt_cnt.first);
+        }
+    }
+
+    glPointSize(size);
     glBegin(GL_POINTS);
     glColor3f(0.0,0.0,0.0);
 
     for(size_t i=0, iend=vpMPs.size(); i<iend;i++)
     {
-        if(vpMPs[i]->isBad() || spRefMPs.count(vpMPs[i]))
+        if(vpMPs[i]->isBad() || spRefMPs.count(vpMPs[i]) || associated.count(vpMPs[i]))
             continue;
         Eigen::Matrix<float,3,1> pos = vpMPs[i]->GetWorldPos();
         glVertex3f(pos(0),pos(1),pos(2));
     }
     glEnd();
 
-    glPointSize(mPointSize);
+    glPointSize(size);
     glBegin(GL_POINTS);
     glColor3f(1.0,0.0,0.0);
 
     for(set<MapPoint*>::iterator sit=spRefMPs.begin(), send=spRefMPs.end(); sit!=send; sit++)
     {
-        if((*sit)->isBad())
+        if((*sit)->isBad() || associated.count(*sit))
             continue;
         Eigen::Matrix<float,3,1> pos = (*sit)->GetWorldPos();
         glVertex3f(pos(0),pos(1),pos(2));
@@ -173,6 +186,108 @@ void MapDrawer::DrawMapPoints()
     }
 
     glEnd();
+}
+
+void MapDrawer::DrawMapObjectsPoints(double size)
+{
+    Map* pActiveMap = mpAtlas->GetCurrentMap();
+    if(!pActiveMap)
+        return;
+
+    const auto& color_manager = CategoryColorsManager::GetInstance();
+    for (auto* obj : pActiveMap->GetAllMapObjects()) {
+        cv::Scalar c;
+        if (use_category_cols_) {
+            c = color_manager[obj->GetTrack()->GetCategoryId()];
+        } else {
+            c = obj->GetTrack()->GetColor();
+        }
+        glColor3f(static_cast<double>(c(2)) / 255,
+                  static_cast<double>(c(1)) / 255,
+                  static_cast<double>(c(0)) / 255);
+        auto assoc_points = obj->GetTrack()->GetFilteredAssociatedMapPoints(10);
+        glPointSize(size);
+        glBegin(GL_POINTS);
+        for (const auto& pt_cnt : assoc_points) {
+            MapPoint* pt = pt_cnt.first;
+            if (pt->isBad())
+                continue;
+            Eigen::Vector3f pos = pt->GetWorldPos();
+            glVertex3f(pos(0),pos(1),pos(2));
+        }
+        glEnd();
+    }
+}
+
+void MapDrawer::DrawDistanceEstimation(double depth)
+{
+    Sophus::SE3f Twc;
+    {
+        unique_lock<mutex> lock(mMutexCamera);
+        Twc = mCameraPose;
+    }
+    Eigen::Vector3f p = Twc.translation();
+    Eigen::Vector3f e = p + static_cast<float>(depth) * Twc.rotationMatrix().col(2);
+
+    glColor3f(0.0, 0.0, 1.0);
+    glBegin(GL_LINE_STRIP);
+    glVertex3f(p[0], p[1], p[2]);
+    glVertex3f(e[0], e[1], e[2]);
+    glEnd();
+}
+
+void MapDrawer::DrawMapObjects()
+{
+    Map* pActiveMap = mpAtlas->GetCurrentMap();
+    if(!pActiveMap)
+        return;
+
+    const auto& color_manager = CategoryColorsManager::GetInstance();
+    glLineWidth(2);
+    for (auto *obj : pActiveMap->GetAllMapObjects()) {
+        cv::Scalar c;
+        if (use_category_cols_) {
+            c = color_manager[obj->GetTrack()->GetCategoryId()];
+        } else {
+            c = obj->GetTrack()->GetColor();
+        }
+        glColor3f(static_cast<double>(c(2)) / 255,
+                  static_cast<double>(c(1)) / 255,
+                  static_cast<double>(c(0)) / 255);
+        const Ellipsoid ell = obj->GetEllipsoid();
+        if (!display_3d_bbox_) {
+            auto pts = ell.GeneratePointCloud();
+            int i = 0;
+            while (i < pts.rows()) {
+                glBegin(GL_LINE_STRIP);
+                for (int k = 0; k < 50 && i < pts.rows(); ++k, ++i){
+                    glVertex3f(pts(i, 0), pts(i, 1), pts(i, 2));
+                }
+                glEnd();
+            }
+        } else {
+            Eigen::Vector3d center = ell.GetCenter();
+            Eigen::Vector3d axes = ell.GetAxes();
+            Eigen::Matrix3d R = ell.GetOrientation();
+            Eigen::Matrix<double, 8, 3> pts;
+            pts << -axes[0], -axes[1], -axes[2],
+                    axes[0], -axes[1], -axes[2],
+                    axes[0],  axes[1], -axes[2],
+                   -axes[0],  axes[1], -axes[2],
+                   -axes[0], -axes[1],  axes[2],
+                    axes[0], -axes[1],  axes[2],
+                    axes[0],  axes[1],  axes[2],
+                   -axes[0],  axes[1],  axes[2];
+            Eigen::Matrix<double, 8, 3> obb = (R * pts.transpose()).transpose();
+            obb.rowwise() += center.transpose();
+
+            const int order[16] = {0, 1, 2, 3, 0, 4, 5, 1, 5, 6, 2, 6, 7, 3, 7, 4};
+            glBegin(GL_LINE_STRIP);
+            for (int k : order)
+                glVertex3f(obb(k, 0), obb(k, 1), obb(k, 2));
+            glEnd();
+        }
+    }
 }
 
 void MapDrawer::DrawKeyFrames(const bool bDrawKF, const bool bDrawGraph, const bool bDrawInertialGraph, const bool bDrawOptLba)

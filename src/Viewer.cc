@@ -164,7 +164,7 @@ void Viewer::Run()
     mbFinished = false;
     mbStopped = false;
 
-    pangolin::CreateWindowAndBind("ORB-SLAM3: Map Viewer",1024,768);
+    pangolin::CreateWindowAndBind("OA-SLAM: Map Viewer",1024,768);
 
     // 3D Mouse handler requires depth testing to be enabled
     glEnable(GL_DEPTH_TEST);
@@ -179,12 +179,22 @@ void Viewer::Run()
     pangolin::Var<bool> menuTopView("menu.Top View",false,false);
     // pangolin::Var<bool> menuSideView("menu.Side View",false,false);
     pangolin::Var<bool> menuShowPoints("menu.Show Points",true,true);
+    // [OA-SLAM]
+    pangolin::Var<bool> menuShowObjectsPoints("menu.Show Obj-Points",true,true);
+    pangolin::Var<float> menuPointsSize("menu.Points Size", 2.0, 1e-1, 1e1, true);
+    pangolin::Var<float> menuObjectsPointsSize("menu.Obj-Points Size", 1.0, 1e-1, 1e1, true);
+    pangolin::Var<bool> menuShowObjects("menu.Show Objects",true,true);
     pangolin::Var<bool> menuShowKeyFrames("menu.Show KeyFrames",true,true);
     pangolin::Var<bool> menuShowGraph("menu.Show Graph",false,true);
     pangolin::Var<bool> menuShowInertialGraph("menu.Show Inertial Graph",true,true);
     pangolin::Var<bool> menuLocalizationMode("menu.Localization Mode",false,true);
     pangolin::Var<bool> menuReset("menu.Reset",false,false);
-    pangolin::Var<bool> menuStop("menu.Stop",false,false);
+    // [OA-SLAM] "Stop" (shutdown from the viewer thread) is replaced by Pause / Quit
+    pangolin::Var<bool> menuPause("menu.Pause",false,true);
+    pangolin::Var<bool> menuCatCol("menu.Color by Cat", false, true);
+    pangolin::Var<bool> menu3DBbox("menu.Disp 3D Bboxes", false, true);
+    pangolin::Var<bool> menuDistEstim("menu.Disp Distance Est.", false, true);
+    pangolin::Var<bool> menuQuit("menu.Quit",false,false);
     pangolin::Var<bool> menuStepByStep("menu.Step By Step",false,true);  // false, true
     pangolin::Var<bool> menuStep("menu.Step",false,false);
 
@@ -204,7 +214,7 @@ void Viewer::Run()
     Twc.SetIdentity();
     pangolin::OpenGlMatrix Ow; // Oriented with g in the z axis
     Ow.SetIdentity();
-    cv::namedWindow("ORB-SLAM3: Current Frame");
+    cv::namedWindow("OA-SLAM: Current Frame");
 
     bool bFollow = true;
     bool bLocalizationMode = false;
@@ -313,12 +323,23 @@ void Viewer::Run()
         if(menuShowKeyFrames || menuShowGraph || menuShowInertialGraph || menuShowOptLba)
             mpMapDrawer->DrawKeyFrames(menuShowKeyFrames,menuShowGraph, menuShowInertialGraph, menuShowOptLba);
         if(menuShowPoints)
-            mpMapDrawer->DrawMapPoints();
+            mpMapDrawer->DrawMapPoints(menuPointsSize, menuShowObjectsPoints);
+        if(menuShowObjectsPoints)
+            mpMapDrawer->DrawMapObjectsPoints(menuObjectsPointsSize);
+        if(menuShowObjects)
+            mpMapDrawer->DrawMapObjects();
+        if(menuDistEstim)
+            mpMapDrawer->DrawDistanceEstimation(mpTracker->GetCurrentMeanDepth());
 
         pangolin::FinishFrame();
 
         cv::Mat toShow;
         cv::Mat im = mpFrameDrawer->DrawFrame(trackedImageScale);
+        if(menuShowObjects)
+        {
+            mpFrameDrawer->DrawDetections(im);
+            mpFrameDrawer->DrawProjections(im);
+        }
 
         if(both){
             cv::Mat imRight = mpFrameDrawer->DrawRightFrame(trackedImageScale);
@@ -335,7 +356,7 @@ void Viewer::Run()
             cv::resize(toShow, toShow, cv::Size(width, height));
         }
 
-        cv::imshow("ORB-SLAM3: Current Frame",toShow);
+        cv::imshow("OA-SLAM: Current Frame",toShow);
         cv::waitKey(mT);
 
         if(menuReset)
@@ -354,19 +375,15 @@ void Viewer::Run()
             menuReset = false;
         }
 
-        if(menuStop)
-        {
-            if(bLocalizationMode)
-                mpSystem->DeactivateLocalizationMode();
+        // [OA-SLAM]
+        if(menuQuit)
+            RequestFinish();
 
-            // Stop all threads
-            mpSystem->Shutdown();
+        mbPaused = menuPause;
 
-            // Save camera trajectory
-            mpSystem->SaveTrajectoryEuRoC("CameraTrajectory.txt");
-            mpSystem->SaveKeyFrameTrajectoryEuRoC("KeyFrameTrajectory.txt");
-            menuStop = false;
-        }
+        mpMapDrawer->SetUseCategoryColors(menuCatCol);
+        mpFrameDrawer->SetUseCategoryColors(menuCatCol);
+        mpMapDrawer->SetDisplay3DBbox(menu3DBbox);
 
         if(Stop())
         {
@@ -448,5 +465,10 @@ void Viewer::Release()
 {
     mbStopTrack = true;
 }*/
+
+bool Viewer::isPaused()
+{
+    return mbPaused;
+}
 
 }

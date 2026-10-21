@@ -46,6 +46,10 @@ namespace ORB_SLAM3
         // Used to track the local map (Tracking)
         int SearchByProjection(Frame &F, const std::vector<MapPoint*> &vpMapPoints, const float th=3, const bool bFarPoints = false, const float thFarPoints = 50.0f);
 
+        // [OA-SLAM] Project all the given MapPoints into the frame (pose from object-based
+        // relocalization) and search matches, without visibility pre-check.
+        int SearchByProjectionAllPoints(Frame &CurrentFrame, const std::vector<MapPoint*>& points, const float th, const int ORBdist);
+
         // Project MapPoints tracked in last frame into the current frame and search matches.
         // Used to track from previous frame (Tracking)
         int SearchByProjection(Frame &CurrentFrame, const Frame &LastFrame, const float th, const bool bMono);

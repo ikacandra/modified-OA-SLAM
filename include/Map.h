@@ -37,6 +37,7 @@ class MapPoint;
 class KeyFrame;
 class Atlas;
 class KeyFrameDatabase;
+class MapObject;
 
 class Map
 {
@@ -118,6 +119,15 @@ public:
     void ApplyScaledRotation(const Sophus::SE3f &T, const float s, const bool bScaledVel=false);
 
     void SetInertialSensor();
+
+    // [OA-SLAM] Objects (ellipsoids) of this map. Only the pointers are stored here:
+    // the owning ObjectTrack frees them.
+    void AddMapObject(MapObject *obj);
+    void EraseMapObject(MapObject* obj);
+    std::vector<MapObject*> GetAllMapObjects();
+    size_t GetNumberMapObjects();
+    // Remove a culled keyframe from the observations of the objects
+    void RemoveKeyFrameFromObjects(KeyFrame* pKF);
     bool IsInertial();
     void SetIniertialBA1();
     void SetIniertialBA2();
@@ -197,6 +207,8 @@ protected:
     bool mbIsInertial;
     bool mbIMU_BA1;
     bool mbIMU_BA2;
+
+    std::set<MapObject*> map_objects_;
 
     // Mutex
     std::mutex mMutexMap;

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Repeated OA-SLAM RGB-D runs with the YOLOv8n-seg TensorRT FP16 front end on Jetson,
+# Repeated OA-SLAM (ORB-SLAM3 backbone) RGB-D runs with the YOLOv8n-seg TensorRT FP16 front end on Jetson,
 # in the same pattern as run_slam_repeat_benchmark_ORB_SLAM3.sh (repetition-major).
 #
 # Usage: scripts/run_benchmark_trt.sh [first_rep] [last_rep] [seq_short ...]
 #   default: repetitions 1..5, all 12 sequences below
-# Layout: $RESULTS/OA-SLAM-Yolov8nSegFP16_<i>/<tum|bonn>/<short_seq>/
+# Layout: $RESULTS/${METHOD}_<i>/<tum|bonn>/<short_seq>/
 #   statistics.txt (ORB-SLAM3 format + loop markers), tegrastats.log, frame_times_*.csv,
 #   camera_poses_*_tum.txt, evo_ape.txt, evo_rpe_trans.txt, evo_rpe_rot.txt, computation_cost.txt
 # A run that stops before the last frame (crash) is moved to $RESULTS/_incomplete/ and the
@@ -15,7 +15,7 @@
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="$HOME/Riset_SLAM/Dataset"
-METHOD="OA-SLAM-Yolov8nSegFP16"
+METHOD="${METHOD:-OA-SLAM3-Yolov8nSegFP16}"  # ORB-SLAM3 backbone (ORB-SLAM2 runs: OA-SLAM-Yolov8nSegFP16)
 RESULTS="${RESULTS:-$HOME/Riset_SLAM/Results/repeat_experiment/$METHOD}"
 ENGINE="$ROOT/models/yolov8n-seg_fp16.engine"
 VIEWER="${VIEWER:-1}"

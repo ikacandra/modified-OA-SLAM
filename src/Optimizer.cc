@@ -852,6 +852,33 @@ int Optimizer::PoseOptimization(Frame *pFrame)
     const float deltaMono = sqrt(5.991);
     const float deltaStereo = sqrt(7.815);
 
+    // [OA-SLAM ADAPTIVE WEIGHT] Weight factors for different semantic categories
+    const float APRILTAG_WEIGHT_FACTOR = 2.0f;        // Fiducial markers - highest trust
+    const float STATIC_OBJECT_WEIGHT_FACTOR = 1.5f;   // Static objects (rigid) - medium trust
+    // Background keypoints keep default weight = 1.0
+
+    auto isInsideAprilTag = [&](const cv::Point2f& pt) -> bool {
+        for (const auto& bbox : pFrame->mvAprilTagBboxes) {
+            if (bbox.width > 0 && bbox.height > 0 &&
+                pt.x >= bbox.x && pt.x <= bbox.x + bbox.width &&
+                pt.y >= bbox.y && pt.y <= bbox.y + bbox.height) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto isInsideStaticObjectMask = [&](const cv::Point2f& pt) -> bool {
+        if (pFrame->mStaticObjectMask.empty()) return false;
+        int x = static_cast<int>(pt.x);
+        int y = static_cast<int>(pt.y);
+        if (x < 0 || x >= pFrame->mStaticObjectMask.cols ||
+            y < 0 || y >= pFrame->mStaticObjectMask.rows) {
+            return false;
+        }
+        return pFrame->mStaticObjectMask.at<uchar>(y, x) > 0;
+    };
+
     {
     unique_lock<mutex> lock(MapPoint::mGlobalMutex);
 
@@ -905,7 +932,13 @@ int Optimizer::PoseOptimization(Frame *pFrame)
 
                     e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
                     e->setMeasurement(obs);
-                    const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];
+                    float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];
+                    // [OA-SLAM ADAPTIVE WEIGHT] Increase weight based on semantic category
+                    if (!pFrame->mvAprilTagBboxes.empty() && isInsideAprilTag(kpUn.pt)) {
+                        invSigma2 *= APRILTAG_WEIGHT_FACTOR;      // AprilTag: weight = 2.0
+                    } else if (isInsideStaticObjectMask(kpUn.pt)) {
+                        invSigma2 *= STATIC_OBJECT_WEIGHT_FACTOR; // Static object: weight = 1.5
+                    }
                     Eigen::Matrix3d Info = Eigen::Matrix3d::Identity()*invSigma2;
                     e->setInformation(Info);
 

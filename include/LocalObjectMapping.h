@@ -31,7 +31,7 @@
 #include <unordered_set>
 
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 class Tracking;
@@ -43,7 +43,7 @@ class MapObject;
 class LocalObjectMapping
 {
 public:
-    LocalObjectMapping(Map* pMap, Tracking* tracker);
+    LocalObjectMapping(Tracking* tracker);
 
     void SetLoopCloser(LoopClosing* pLoopCloser);
 
@@ -115,7 +115,6 @@ protected:
 
     std::mutex mMutexStop;
 
-    Map* mpMap;
     Tracking* tracker_;
     // bool mbAcceptKeyFrames;
     // std::mutex mMutexAccept;

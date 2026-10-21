@@ -8,3 +8,4 @@ Vocabulary/ORBvoc.txt
 models/*.engine
 models/*.pt
 *.log
+build_log*.txt

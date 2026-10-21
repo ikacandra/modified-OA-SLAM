@@ -27,7 +27,7 @@
 #include "Ellipsoid.h"
 #include "Utils.h"
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 using Mapping = std::vector<std::vector<size_t>>;
@@ -45,9 +45,9 @@ solveP3P_ransac(const std::vector<Ellipsoid, Eigen::aligned_allocator<Ellipsoid>
                 const std::vector<BBox2, Eigen::aligned_allocator<BBox2>>& detections,
                 const std::vector<size_t>& detections_categories, const Eigen::Matrix3d& K, double THRESHOLD);
 
-cv::Mat OptimizePoseFromObjects(const std::vector<Ellipse, Eigen::aligned_allocator<Ellipse>>& ellipses,
+Sophus::SE3f OptimizePoseFromObjects(const std::vector<Ellipse, Eigen::aligned_allocator<Ellipse>>& ellipses,
                                 const std::vector<Ellipsoid, Eigen::aligned_allocator<Ellipsoid>>& ellipsoids,
-                                cv::Mat Rt, const Eigen::Matrix3d& K);
+                                const Sophus::SE3f& Tcw, const Eigen::Matrix3d& K);
 
 
 }

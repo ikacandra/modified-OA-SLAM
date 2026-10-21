@@ -2073,4 +2073,74 @@ namespace ORB_SLAM3
         return dist;
     }
 
+    int ORBmatcher::SearchByProjectionAllPoints(Frame &CurrentFrame, const std::vector<MapPoint*>& points, const float th, const int ORBdist)
+    {
+        int nmatches = 0;
+
+        const Sophus::SE3f Tcw = CurrentFrame.GetPose();
+        const Eigen::Vector3f Ow = Tcw.inverse().translation();
+
+        for(size_t i=0, iend=points.size(); i<iend; i++)
+        {
+            MapPoint* pMP = points[i];
+            if(!pMP || pMP->isBad())
+                continue;
+
+            //Project
+            const Eigen::Vector3f x3Dw = pMP->GetWorldPos();
+            const Eigen::Vector3f x3Dc = Tcw * x3Dw;
+            if(x3Dc(2) <= 0)
+                continue;
+
+            const Eigen::Vector2f uv = CurrentFrame.mpCamera->project(x3Dc);
+
+            if(uv(0)<CurrentFrame.mnMinX || uv(0)>CurrentFrame.mnMaxX)
+                continue;
+            if(uv(1)<CurrentFrame.mnMinY || uv(1)>CurrentFrame.mnMaxY)
+                continue;
+
+            // Depth must be inside the scale pyramid of the image
+            const float dist3D = (x3Dw-Ow).norm();
+            const float maxDistance = pMP->GetMaxDistanceInvariance();
+            const float minDistance = pMP->GetMinDistanceInvariance();
+            if(dist3D<minDistance || dist3D>maxDistance)
+                continue;
+
+            int nPredictedLevel = pMP->PredictScale(dist3D,&CurrentFrame);
+
+            // Search in a window
+            const float radius = th*CurrentFrame.mvScaleFactors[nPredictedLevel];
+            const vector<size_t> vIndices2 = CurrentFrame.GetFeaturesInArea(uv(0), uv(1), radius, nPredictedLevel-1, nPredictedLevel+1);
+            if(vIndices2.empty())
+                continue;
+
+            const cv::Mat dMP = pMP->GetDescriptor();
+
+            int bestDist = 256;
+            int bestIdx2 = -1;
+            for(vector<size_t>::const_iterator vit=vIndices2.begin(); vit!=vIndices2.end(); vit++)
+            {
+                const size_t i2 = *vit;
+                if(CurrentFrame.mvpMapPoints[i2])
+                    continue;
+
+                const cv::Mat &d = CurrentFrame.mDescriptors.row(i2);
+                const int dist = DescriptorDistance(dMP,d);
+                if(dist<bestDist)
+                {
+                    bestDist=dist;
+                    bestIdx2=i2;
+                }
+            }
+
+            if(bestIdx2>=0 && bestDist<=ORBdist)
+            {
+                CurrentFrame.mvpMapPoints[bestIdx2]=pMP;
+                nmatches++;
+            }
+        }
+
+        return nmatches;
+    }
+
 } //namespace ORB_SLAM

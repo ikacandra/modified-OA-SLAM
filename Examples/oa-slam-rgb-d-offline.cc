@@ -14,7 +14,6 @@
 #include <ImageDetections.h>
 #include <TRTDetector.h>
 #include <System.h>
-#include "Osmap.h"
 #include <nlohmann/json.hpp>
 #include <experimental/filesystem>
 #include "Utils.h"
@@ -124,15 +123,15 @@ int main(int argc, char **argv)
 
     // Load object detections
     auto extension = get_file_extension(detections_file);
-    std::shared_ptr<ORB_SLAM2::ImageDetectionsManager> detector = nullptr;
+    std::shared_ptr<ORB_SLAM3::ImageDetectionsManager> detector = nullptr;
     bool detect_from_file = false;
     if (extension == "onnx") { // load network
-        detector = std::make_shared<ORB_SLAM2::ObjectDetector>(detections_file, classes_to_ignore);
+        detector = std::make_shared<ORB_SLAM3::ObjectDetector>(detections_file, classes_to_ignore);
         detect_from_file = false;
         std::cout << "Object detector loaded from ONNX file: " << detections_file << "\n";
     } else if (extension == "engine") { // TensorRT engine
 #ifdef USE_TENSORRT
-        detector = std::make_shared<ORB_SLAM2::TRTDetector>(detections_file, classes_to_ignore);
+        detector = std::make_shared<ORB_SLAM3::TRTDetector>(detections_file, classes_to_ignore);
         detect_from_file = false;
         std::cout << "Object detector loaded from TensorRT engine: " << detections_file << "\n";
 #else
@@ -140,7 +139,7 @@ int main(int argc, char **argv)
         return 1;
 #endif
     } else if (extension == "json") { // load from external detections file
-        detector = std::make_shared<ORB_SLAM2::DetectionsFromFile>(detections_file, classes_to_ignore);
+        detector = std::make_shared<ORB_SLAM3::DetectionsFromFile>(detections_file, classes_to_ignore);
         detect_from_file = true;
     } else {
         std::cout << "Invalid detection file. It should be .json, .onnx or .engine\n"
@@ -148,20 +147,20 @@ int main(int argc, char **argv)
     }
 
     // Relocalization mode
-    ORB_SLAM2::enumRelocalizationMode relocalization_mode = ORB_SLAM2::RELOC_POINTS;
+    ORB_SLAM3::enumRelocalizationMode relocalization_mode = ORB_SLAM3::RELOC_POINTS;
     if (reloc_mode == string("points"))
-        relocalization_mode = ORB_SLAM2::RELOC_POINTS;
+        relocalization_mode = ORB_SLAM3::RELOC_POINTS;
     else if (reloc_mode == std::string("objects"))
-        relocalization_mode = ORB_SLAM2::RELOC_OBJECTS;
+        relocalization_mode = ORB_SLAM3::RELOC_OBJECTS;
     else if (reloc_mode == std::string("points+objects"))
-        relocalization_mode = ORB_SLAM2::RELOC_OBJECTS_POINTS;
+        relocalization_mode = ORB_SLAM3::RELOC_OBJECTS_POINTS;
     else {
         std::cerr << "Error: Invalid parameter for relocalization mode.\n";
         return 1;
     }
 
     // Create system
-    ORB_SLAM2::System SLAM(vocabulary_file, parameters_file, ORB_SLAM2::System::RGBD, use_viewer, false, false);
+    ORB_SLAM3::System SLAM(vocabulary_file, parameters_file, ORB_SLAM3::System::RGBD, use_viewer);
     std::cout << "System loaded.\n";
     SLAM.SetRelocalizationMode(relocalization_mode);
 
@@ -171,8 +170,6 @@ int main(int argc, char **argv)
     cout << endl << "-------" << endl;
     cout << "Start processing sequence ..." << endl;
     cout << "Images in the sequence: " << nImages << endl << endl;
-
-    ORB_SLAM2::Osmap osmap = ORB_SLAM2::Osmap(SLAM);
 
     // Main loop
     cv::Mat imRGB, imD;
@@ -229,7 +226,7 @@ int main(int argc, char **argv)
 
         // Get object detections
         std::chrono::steady_clock::time_point t_det0 = std::chrono::steady_clock::now();
-        std::vector<ORB_SLAM2::Detection::Ptr> detections;
+        std::vector<ORB_SLAM3::Detection::Ptr> detections;
         if (detector) {
             if (detect_from_file)
                 detections = detector->detect(filenameIm); 
@@ -240,14 +237,11 @@ int main(int argc, char **argv)
         std::chrono::steady_clock::time_point t_det1 = std::chrono::steady_clock::now();
 
         // Pass to SLAM
-        cv::Mat m = SLAM.TrackRGBD(imRGB, imD, tframe, detections, false);
+        // [ORB-SLAM3] Tcw is the identity when the frame could not be localized
+        Sophus::SE3f Tcw = SLAM.TrackRGBD(imRGB, imD, tframe, detections, false);
         std::chrono::steady_clock::time_point t_trk1 = std::chrono::steady_clock::now();
-        
-        // [FIX 3] Lưu Pose vào vector poses
-        if (!m.empty())
-            poses.push_back(ORB_SLAM2::cvToEigenMatrix<double, float, 4, 4>(m));
-        else
-            poses.push_back(Eigen::Matrix4d::Identity());
+
+        poses.push_back(Tcw.matrix().cast<double>());
 
         std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
         double ttrack = std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count();
@@ -348,14 +342,15 @@ int main(int argc, char **argv)
         stats_file << "loop_end: " << loop_end << "\n";
     }
 
+    // [ORB-SLAM3] trajectory of all the frames, relative to their reference keyframes (corrected
+    // by loop closures / map merging), as written by the ORB-SLAM3 examples
+    SLAM.SaveTrajectoryTUM(output_folder + "CameraTrajectory_" + output_name + "_tum.txt");
     SLAM.SaveKeyFrameTrajectoryTUM(output_folder + "keyframes_poses_" + output_name + "_tum.txt");
     SLAM.SaveKeyFrameTrajectoryJSON(output_folder + "keyframes_poses_" + output_name + ".json", filenames);
     SLAM.SaveMapPointsOBJ(output_folder + "map_points_" + output_name + ".obj");
     SLAM.SaveMapObjectsOBJ(output_folder + "map_objects_" + output_name + ".obj");
     SLAM.SaveMapObjectsTXT(output_folder + "map_objects_" + output_name + ".txt");
     std::cout << "\n";
-
-    osmap.mapSave(output_folder + "map_" + output_name);
 
     return 0;
 }

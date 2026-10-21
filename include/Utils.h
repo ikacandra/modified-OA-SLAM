@@ -25,6 +25,7 @@
 #include <opencv2/core.hpp>
 #include <unordered_set>
 #include <unordered_map>
+#include "sophus/se3.hpp"
 
 #define TO_RAD(x) 0.01745329251 * (x)
 #define TO_DEG(x) 57.2957795131 * (x)
@@ -39,7 +40,7 @@ inline std::string get_file_extension(const std::string& f) {
     return f.substr(idx+1);
 }
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 using BBox2 = Eigen::Vector4d;
@@ -128,6 +129,18 @@ Eigen::Matrix<T, (N*(N+1))/2, 1> sym2vec(const Eigen::Matrix<T, N, N>& M)
         }
     }
     return v;
+}
+
+// [ORB-SLAM3] Camera poses are Sophus::SE3f (Tcw). Rt is the 3x4 world-to-camera matrix.
+inline Matrix34d SE3ToRt(const Sophus::SE3f& Tcw) {
+    return Tcw.matrix3x4().cast<double>();
+}
+
+inline Sophus::SE3f RtToSE3(const Matrix34d& Rt) {
+    Eigen::Matrix3d R = Rt.block<3, 3>(0, 0);
+    Eigen::Quaterniond q(R);
+    q.normalize();
+    return Sophus::SE3f(q.cast<float>(), Rt.col(3).cast<float>());
 }
 
 template <class T_out, class T_in, int N, int M>

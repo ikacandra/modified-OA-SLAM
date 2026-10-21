@@ -29,16 +29,53 @@
 #include "MLPnPsolver.h"
 #include "GeometricTools.h"
 
+// [OA-SLAM]
+#include "Ellipsoid.h"
+#include "Ellipse.h"
+#include "MapObject.h"
+#include "LocalObjectMapping.h"
+#include "Localization.h"
+#include "Utils.h"
+
 #include <iostream>
 
 #include <mutex>
 #include <chrono>
+#include <numeric>
+#include <cstdlib>
+#include <unordered_set>
+#include <unordered_map>
+#include <dlib/optimization/max_cost_assignment.h>
 
 
 using namespace std;
+using std::chrono::high_resolution_clock;
+using std::chrono::duration;
+
+// COCO class ids (stock yolov8n-seg). The custom-model ids were:
+// AprilTag 0, chair 1, door 2, person 3, pottedplant 4.
+// COCO has no AprilTag / door class: 1000 / 1001 are never produced, which disables
+// the AprilTag-weighted pose optimization.
+#define APRILTAG_CATEGORY_ID    1000
+#define CHAIR_CATEGORY_ID       56
+#define DOOR_CATEGORY_ID        1001
+#define PERSON_CATEGORY_ID      0
+#define POTTEDPLANT_CATEGORY_ID 58
 
 namespace ORB_SLAM3
 {
+
+// [OA-SLAM] Ablation parameters (object association), overridable by environment variables.
+// Defaults are the original hardcoded values.
+static double OaEnvParam(const char* name, double def)
+{
+    const char* v = std::getenv(name);
+    return v ? std::atof(v) : def;
+}
+static const double OA_IOU2D = OaEnvParam("OA_IOU2D", 0.2);
+static const double OA_IOU3D = OaEnvParam("OA_IOU3D", 0.3);
+static const int OA_MIN_OBS = static_cast<int>(OaEnvParam("OA_MIN_OBS", 10));
+
 
 
 Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Atlas *pAtlas, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor, Settings* settings, const string &_nameSeq):
@@ -48,6 +85,9 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
 {
+    std::cout << "EFFECTIVE OA_IOU2D = " << OA_IOU2D << "\n"
+              << "EFFECTIVE OA_IOU3D = " << OA_IOU3D << "\n"
+              << "EFFECTIVE OA_MIN_OBS = " << OA_MIN_OBS << "\n";
     // Load camera parameters from settings file
     if(settings){
         newParameterLoader(settings);
@@ -1517,10 +1557,13 @@ Sophus::SE3f Tracking::GrabImageStereo(const cv::Mat &imRectLeft, const cv::Mat 
 }
 
 
-Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, string filename)
+Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const double &timestamp, string filename,
+                                     const std::vector<Detection::Ptr>& detections, bool force_relocalize)
 {
+    current_frame_idx_ = (current_frame_idx_ + 1) % (std::numeric_limits<size_t>::max()-1);
     mImGray = imRGB;
     cv::Mat imDepth = imD;
+    imRGB.copyTo(im_rgb_);
 
     if(mImGray.channels()==3)
     {
@@ -1537,18 +1580,21 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
             cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
     }
 
+    // [OA-SLAM] Process detections first to create the mask of dynamic objects for the Frame
+    cv::Mat dynamic_mask, static_object_mask;
+    PrepareDetections(detections, imRGB.size(), dynamic_mask, static_object_mask);
+
     if((fabs(mDepthMapFactor-1.0f)>1e-5) || imDepth.type()!=CV_32F)
         imDepth.convertTo(imDepth,CV_32F,mDepthMapFactor);
 
     if (mSensor == System::RGBD)
-        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera);
+        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,
+                              static_cast<Frame*>(NULL),IMU::Calib(),dynamic_mask);
     else if(mSensor == System::IMU_RGBD)
-        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib);
+        mCurrentFrame = Frame(mImGray,imDepth,timestamp,mpORBextractorLeft,mpORBVocabulary,mK,mDistCoef,mbf,mThDepth,mpCamera,&mLastFrame,*mpImuCalib,
+                              dynamic_mask);
 
-
-
-
-
+    SetFrameSemantics(static_object_mask);
 
     mCurrentFrame.mNameFile = filename;
     mCurrentFrame.mnDataset = mnNumDataset;
@@ -1557,15 +1603,26 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
     vdORBExtract_ms.push_back(mCurrentFrame.mTimeORB_Ext);
 #endif
 
-    Track();
+    if (force_relocalize)
+        ForceRelocalization();
+    else
+    {
+        Track();
+        TrackObjects(imRGB);
+        mpFrameDrawer->Update(this);
+    }
 
     return mCurrentFrame.GetPose();
 }
 
 
-Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
+Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename,
+                                          const std::vector<Detection::Ptr>& detections, bool force_relocalize)
 {
+    current_frame_idx_ = (current_frame_idx_ + 1) % (std::numeric_limits<size_t>::max()-1);
     mImGray = im;
+    im.copyTo(im_rgb_);
+
     if(mImGray.channels()==3)
     {
         if(mbRGB)
@@ -1581,22 +1638,30 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
             cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
     }
 
+    // [OA-SLAM] Process detections first to create the mask of dynamic objects for the Frame
+    cv::Mat dynamic_mask, static_object_mask;
+    PrepareDetections(detections, im.size(), dynamic_mask, static_object_mask);
+
     if (mSensor == System::MONOCULAR)
     {
         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
-            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,
+                                  static_cast<Frame*>(NULL),IMU::Calib(),dynamic_mask);
         else
-            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth);
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,
+                                  static_cast<Frame*>(NULL),IMU::Calib(),dynamic_mask);
     }
     else if(mSensor == System::IMU_MONOCULAR)
     {
         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)
         {
-            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
+            mCurrentFrame = Frame(mImGray,timestamp,mpIniORBextractor,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib,dynamic_mask);
         }
         else
-            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib);
+            mCurrentFrame = Frame(mImGray,timestamp,mpORBextractorLeft,mpORBVocabulary,mpCamera,mDistCoef,mbf,mThDepth,&mLastFrame,*mpImuCalib,dynamic_mask);
     }
+
+    SetFrameSemantics(static_object_mask);
 
     if (mState==NO_IMAGES_YET)
         t0=timestamp;
@@ -1609,9 +1674,415 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
 #endif
 
     lastID = mCurrentFrame.mnId;
-    Track();
+
+    if (force_relocalize)
+        ForceRelocalization();
+    else
+    {
+        Track();
+        TrackObjects(im);
+        mpFrameDrawer->Update(this);
+    }
 
     return mCurrentFrame.GetPose();
+}
+
+
+void Tracking::PrepareDetections(const std::vector<Detection::Ptr>& detections, const cv::Size& im_size,
+                                 cv::Mat& dynamic_mask, cv::Mat& static_object_mask)
+{
+    K_ = cvToEigenMatrix<double, float, 3, 3>(mK);
+
+    current_frame_detections_ = detections;
+    current_frame_good_detections_.clear(); // static objects used by the object SLAM
+
+    // [OA-SLAM] Mask of dynamic objects (persons): keypoints inside are discarded
+    dynamic_mask = cv::Mat::zeros(im_size, CV_8UC1);
+
+    // [ADAPTIVE WEIGHT] Mask of static objects (weight = 1.5 in the pose optimization)
+    static_object_mask = cv::Mat::zeros(im_size, CV_8UC1);
+
+    for (auto det : current_frame_detections_) {
+        // CASE 1: PERSON -> mask + continue (not used by the object SLAM)
+        if (det->category_id == PERSON_CATEGORY_ID) {
+            if (!det->mask.empty()) {
+                cv::bitwise_or(dynamic_mask, det->mask, dynamic_mask);
+            }
+            continue;
+        }
+
+        // CASE 2 & 3: AprilTag + static objects -> good detections
+        if (det->score > 0.5) {
+            current_frame_good_detections_.push_back(det);
+
+            // Only static objects are added to the mask (AprilTags use their bbox)
+            if (det->category_id != APRILTAG_CATEGORY_ID && !det->mask.empty()) {
+                cv::bitwise_or(static_object_mask, det->mask, static_object_mask);
+            }
+        }
+    }
+
+    // Dilate the mask to cover the boundaries of the dynamic objects
+    if (cv::countNonZero(dynamic_mask) > 0) {
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(15, 15));
+        cv::dilate(dynamic_mask, dynamic_mask, kernel);
+    }
+}
+
+
+void Tracking::SetFrameSemantics(const cv::Mat& static_object_mask)
+{
+    // [ADAPTIVE WEIGHT] Assign static object mask to Frame
+    mCurrentFrame.mStaticObjectMask = static_object_mask;
+
+    // Populate AprilTag bounding boxes for weighted pose optimization
+    const unsigned int APRILTAG_CLASS_ID = APRILTAG_CATEGORY_ID;
+    mCurrentFrame.mvAprilTagBboxes.clear();
+    for (const auto& det : current_frame_detections_) {
+        if (det->category_id == APRILTAG_CLASS_ID && det->score > 0.5) {
+            // BBox2 = Eigen::Vector4d (xmin, ymin, xmax, ymax)
+            int xmin = static_cast<int>(det->bbox[0]);
+            int ymin = static_cast<int>(det->bbox[1]);
+            int width = static_cast<int>(det->bbox[2] - det->bbox[0]);
+            int height = static_cast<int>(det->bbox[3] - det->bbox[1]);
+            // Only add valid bounding boxes
+            if (width > 0 && height > 0 && xmin >= 0 && ymin >= 0) {
+                mCurrentFrame.mvAprilTagBboxes.push_back(cv::Rect(xmin, ymin, width, height));
+            }
+        }
+    }
+}
+
+
+void Tracking::ForceRelocalization()
+{
+    auto t1 = high_resolution_clock::now();
+
+    bool bOK = RelocalizationWithMode();
+
+    auto t2 = high_resolution_clock::now();
+    duration<double, std::milli> ms_double = t2 - t1;
+
+    mpFrameDrawer->Update(this);
+    if (bOK)
+        mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.GetPose());
+
+    mpSystem->relocalization_duration = ms_double.count();
+    mpSystem->relocalization_status = bOK;
+}
+
+
+bool Tracking::RelocalizationWithMode()
+{
+    bool bOK = false;
+    if (mpSystem->GetRelocalizationMode() == RELOC_POINTS) {
+        std::cout << "Relocalize with points.\n";
+        bOK = Relocalization();
+    } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS) {
+        std::cout << "Relocalize with objects.\n";
+        bOK = RelocalizationFromObjects(false);
+    } else if (mpSystem->GetRelocalizationMode() == RELOC_OBJECTS_POINTS) {
+        std::cout << "Relocalize with objects and points.\n";
+        bOK = Relocalization();
+        if (!bOK)
+            bOK = RelocalizationFromObjects(true);
+    }
+    return bOK;
+}
+
+
+void Tracking::TrackObjects(const cv::Mat& im)
+{
+    // [ORB-SLAM3] Only the tracks of the active Atlas map are associated with the detections.
+    // A track of another map that is not in a map yet is stale (new map started after
+    // tracking loss): drop it. Objects inserted in another map stay in that map.
+    Map* pMap = mpAtlas->GetCurrentMap();
+    std::vector<ObjectTrack::Ptr> active_tracks, stale_tracks;
+    for (auto& tr : objectTracks_) {
+        if (tr->GetMap() == pMap)
+            active_tracks.push_back(tr);
+        else if (tr->GetStatus() != ObjectTrackStatus::IN_MAP)
+            stale_tracks.push_back(tr);
+    }
+    for (auto& tr : stale_tracks)
+        RemoveTrack(tr);
+
+    // Update mean depth
+    if (mState == Tracking::OK) {
+        Matrix34d Rt = SE3ToRt(mCurrentFrame.GetPose());
+        double z_mean = 0.0;
+        unsigned int z_nb = 0;
+        for(size_t i = 0; i < mCurrentFrame.mvpMapPoints.size(); i++) {
+            MapPoint* pMP = mCurrentFrame.mvpMapPoints[i];
+            if(pMP && !mCurrentFrame.mvbOutlier[i]) {
+                Eigen::Vector4d p = pMP->GetWorldPos().cast<double>().homogeneous();
+                Eigen::Vector3d p_cam = Rt * p;
+                z_mean += p_cam[2];
+                z_nb++;
+            }
+        }
+        if (z_nb > 0)
+            z_mean /= z_nb;
+        // std::cout << "Mean depth = " << z_mean << "\n";
+        current_mean_depth_ = z_mean;
+    }
+
+    //std::cout << "Frame " << current_frame_idx_ << " ===========\n";
+    // std::cout << "Created new KF: " << createdNewKeyFrame_ << "\n";
+    //std::cout << "Nb Object Tracks: " << objectTracks_.size() << "\n";
+    //std::cout << "Nb Map Objects  : " << mpMap->GetNumberMapObjects() << "\n";
+    // for (auto tr : objectTracks_) {
+    //     std::cout << "    - tr " << tr->GetId() << " : " << tr->GetNbObservations() << "\n";
+    // }
+
+    double MIN_2D_IOU_THRESH = OA_IOU2D;
+    double MIN_3D_IOU_THRESH = OA_IOU3D;
+    int TIME_DIFF_THRESH = 30;
+
+
+    BBox2 img_bbox(0, 0, im.cols, im.rows);
+
+    if (mState == Tracking::OK) {
+
+        // Keep only detections with a certain score
+        if (current_frame_good_detections_.size() != 0) {
+
+            KeyFrame *kf = mpLastKeyFrame;
+            if (!createdNewKeyFrame_)
+                kf = nullptr;
+
+
+            // pre-compute all the projections of all ellipsoids which already reconstructed
+            Matrix34d Rt = SE3ToRt(mCurrentFrame.GetPose());
+            Matrix34d P;
+            P = K_ * Rt;
+            std::unordered_map<ObjectTrack::Ptr, BBox2> proj_bboxes;
+            for (auto tr: active_tracks) {
+                if (tr->GetStatus() == ObjectTrackStatus::INITIALIZED ||
+                    tr->GetStatus() == ObjectTrackStatus::IN_MAP) {
+                    MapObject* obj = tr->GetMapObject();
+                    Eigen::Vector3d c = obj->GetEllipsoid().GetCenter();
+                    double z = Rt.row(2).dot(c.homogeneous());
+                    auto ell = obj->GetEllipsoid().project(P);
+                    BBox2 bb = ell.ComputeBbox();
+                    if (bboxes_intersection(bb, img_bbox) < 0.3 * bbox_area(bb)) {
+                        continue;
+                    }
+                    proj_bboxes[tr] = ell.ComputeBbox();
+
+                    // Check occlusions and keep only the nearest
+                    std::unordered_set<ObjectTrack::Ptr> hidden;
+                    for (auto it : proj_bboxes) {
+                        if (it.first != tr && bboxes_iou(it.second, bb) > 0.9) {
+                            Eigen::Vector3d c2 = it.first->GetMapObject()->GetEllipsoid().GetCenter();
+                            double z2 = Rt.row(2).dot(c2.homogeneous());
+                            if (z < z2) {
+                                // remove z2
+                                hidden.insert(it.first);
+                            } else {
+                                // remove z
+                                hidden.insert(tr);
+                            }
+                            break;
+                        }
+                    }
+                    for (auto hid : hidden) {
+                        proj_bboxes.erase(hid);
+                    }
+                }
+            }
+
+            // find possible tracks
+            std::vector<ObjectTrack::Ptr> possible_tracks;
+            for (auto tr : active_tracks) {
+                auto bb = tr->GetLastBbox();
+                if (tr->GetLastObsFrameId() + 60 >= current_frame_idx_ &&
+                    bboxes_intersection(bb, img_bbox) >= 0.3 * bbox_area(bb)) {
+                    possible_tracks.push_back(tr);
+                } else if (proj_bboxes.find(tr) != proj_bboxes.end()) {
+                    possible_tracks.push_back(tr);
+                }
+            }
+
+            // Associated map points to each detection
+            std::vector<std::unordered_set<MapPoint*>> assoc_map_points(current_frame_good_detections_.size());
+            for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
+                for (size_t j = 0; j < mCurrentFrame.mvKeysUn.size(); ++j) {
+                    if (mCurrentFrame.mvpMapPoints[j]) {
+                        const auto& kp = mCurrentFrame.mvKeysUn[j];
+                        MapPoint* corresp_map_point = mCurrentFrame.mvpMapPoints[j];
+                        if (is_inside_bbox(kp.pt.x, kp.pt.y, current_frame_good_detections_[i]->bbox)) {
+                            assoc_map_points[i].insert(corresp_map_point);
+                        }
+                    }
+                }
+            }
+
+            // Try to match detections to existing object track based on the associated map points
+            int THRESHOLD_NB_MATCH = 10;
+            std::vector<int> matched_by_points(current_frame_good_detections_.size(), -1);
+            std::vector<std::vector<size_t>> nb_matched_points(current_frame_good_detections_.size(), std::vector<size_t>());
+            for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
+                int det_cat = current_frame_good_detections_[i]->category_id;
+                size_t max_nb_matches = 0;
+                size_t best_matched_track = 0;
+                for (size_t j = 0; j < possible_tracks.size(); ++j) {
+                    auto tr_map_points = possible_tracks[j]->GetAssociatedMapPoints();
+                    size_t n = count_set_map_intersection(assoc_map_points[i], tr_map_points);
+                    if (n > max_nb_matches) {
+                        max_nb_matches = n;
+                        best_matched_track = j;
+                    }
+
+                    if (det_cat != possible_tracks[j]->GetCategoryId())
+                        n = 0;
+                    nb_matched_points[i].push_back(n);
+                }
+
+                if (max_nb_matches > THRESHOLD_NB_MATCH &&
+                    current_frame_good_detections_[i]->category_id == possible_tracks[best_matched_track]->GetCategoryId()) {
+                    matched_by_points[i] = best_matched_track;
+                }
+            }
+
+
+            int m = std::max(possible_tracks.size(), current_frame_good_detections_.size());
+            dlib::matrix<long> cost = dlib::zeros_matrix<long>(m, m);
+            std::vector<long> assignment(m, std::numeric_limits<long>::max()); // Important to have it in 'long', max_int is used to force assignment of tracks already matched using points
+            if (current_frame_good_detections_.size() > 0)
+            {
+                // std::cout << "Hungarian algorithm size " << m << "\n";
+                for (size_t di = 0; di < current_frame_good_detections_.size(); ++di) {
+                    auto det = current_frame_good_detections_[di];
+
+                    for (size_t ti = 0; ti < possible_tracks.size(); ++ti) {
+                        auto tr = possible_tracks[ti];
+                        if (tr->GetCategoryId() == det->category_id) {
+                            double iou_2d = 0;
+                            double iou_3d = 0;
+
+                            if (tr->GetLastObsFrameId() + TIME_DIFF_THRESH >= current_frame_idx_)
+                                iou_2d = bboxes_iou(tr->GetLastBbox(), det->bbox);
+
+                            if (proj_bboxes.find(tr) != proj_bboxes.end())
+                                iou_3d = bboxes_iou(proj_bboxes[tr], det->bbox);
+
+                            if (iou_2d < MIN_2D_IOU_THRESH) iou_2d = 0;
+                            if (iou_3d < MIN_3D_IOU_THRESH) iou_3d = 0;
+
+                            // std::cout << "2D: " << iou_2d << "\n";
+                            // std::cout << "3D: " << iou_3d << "\n";
+                            cost(di, ti) = std::max(iou_2d, iou_3d) * 1000;
+                        }
+                    }
+
+                    if (matched_by_points[di] != -1) {
+                        cost(di, matched_by_points[di]) = std::numeric_limits<int>::max();
+                    }
+                }
+
+                // for (size_t i = 0; i < current_frame_good_detections_.size(); ++i) {
+                //     for (size_t j = 0; j < possible_tracks.size(); ++j) {
+                //         // std::cout << i << " " << j << " " << nb_matched_points[i][j] << "\n";
+                //         cost(i, j) += nb_matched_points[i][j] * 1000;
+                //     }
+                // }
+
+                assignment = dlib::max_cost_assignment(cost); // solve
+            }
+
+
+            std::vector<ObjectTrack::Ptr> new_tracks;
+            for (size_t di = 0; di < current_frame_good_detections_.size(); ++di) {
+                auto det = current_frame_good_detections_[di];
+                auto assigned_track_idx = assignment[di];
+                if (assigned_track_idx >= static_cast<long>(possible_tracks.size()) || cost(di, assigned_track_idx) == 0) {
+                    // assigned to non-existing => means not assigned
+                    auto tr = ObjectTrack::CreateNewObjectTrack(det->category_id, det->bbox, det->score, Rt,
+                                                                current_frame_idx_, this, kf, pMap);
+                    // std::cout << "create new track " << tr->GetId() << "\n";
+                    new_tracks.push_back(tr);
+                } else {
+                    ObjectTrack::Ptr associated_track = possible_tracks[assigned_track_idx];
+                    associated_track->AddDetection(det->bbox, det->score, Rt, current_frame_idx_, kf);
+                    if (kf && associated_track->GetStatus() == ObjectTrackStatus::IN_MAP) {
+                        // std::cout << "Add modified objects" << std::endl;
+                        if (local_object_mapper_)
+                            local_object_mapper_->InsertModifiedObject(associated_track->GetMapObject());
+                    }
+                }
+            }
+
+            for (auto tr : new_tracks) {
+                objectTracks_.push_back(tr);
+                active_tracks.push_back(tr);
+            }
+
+
+            if (!mbOnlyTracking) {
+                for (auto& tr : active_tracks) {
+                    if (tr->GetLastObsFrameId() == current_frame_idx_) {
+                        // Try reconstruct from points
+                        if ((tr->GetNbObservations() > OA_MIN_OBS && tr->GetStatus() == ObjectTrackStatus::ONLY_2D) ||
+                            (tr->GetNbObservations() % 2 == 0 && tr->GetStatus() == ObjectTrackStatus::INITIALIZED)) {
+                            // tr->ReconstructFromSamplesEllipsoid();
+                            // tr->ReconstructFromSamplesCenter();
+
+                        bool status_rec = tr->ReconstructFromCenter(); // try to reconstruct and change status to INITIALIZED if success
+                        // tr->ReconstructFromLandmarks(mpMap);
+                        // tr->ReconstructCrocco(false); // not working
+                        if (status_rec)
+                            tr->OptimizeReconstruction(pMap);
+                        }
+                    }
+
+                    // Try to optimize objects and insert in the map
+                    if (tr->GetNbObservations() >= 40 && tr->GetStatus() == ObjectTrackStatus::INITIALIZED) {
+                        tr->OptimizeReconstruction(pMap);
+                        // std::cout << "First opimitzation done.\n";
+                        auto checked = tr->CheckReprojectionIoU(0.3);
+                        // std::cout << "Check reprojection " << checked << ".\n";
+                        if (checked) {
+                            // Add object to map
+                            tr->InsertInMap(pMap);
+                            // Add object in the local object mapping thread to run a fusion checking
+                            if (local_object_mapper_)
+                                local_object_mapper_->InsertModifiedObject(tr->GetMapObject());
+                        } else {
+                            tr->SetIsBad(); // or only reset to ONLY_2D ?
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!mbOnlyTracking) {
+            // Remove objects that are not tracked anymore and not initialized or in the map
+            for (ObjectTrack::Ptr tr : objectTracks_) {
+                if (static_cast<int>(tr->GetLastObsFrameId()) < static_cast<int>(current_frame_idx_) - TIME_DIFF_THRESH
+                    && tr->GetStatus() != ObjectTrackStatus::IN_MAP) {
+                        tr->SetIsBad();
+                    }
+            }
+
+            // Clean bad objects
+            auto tr_it = objectTracks_.begin();
+            while (tr_it != objectTracks_.end()) {
+                auto temp = *tr_it;
+                ++tr_it;
+                if (temp->IsBad())
+                    RemoveTrack(temp);
+            }
+        }
+    }
+}
+
+
+void Tracking::RemoveTrack(ObjectTrack::Ptr track)
+{
+    if (track->GetMapObject() && track->GetMap())
+        track->GetMap()->EraseMapObject(track->GetMapObject());
+    objectTracks_.remove(track);
 }
 
 
@@ -1793,6 +2264,7 @@ void Tracking::ResetFrameIMU()
 
 void Tracking::Track()
 {
+    createdNewKeyFrame_ = false;
 
     if (bStepByStep)
     {
@@ -1999,8 +2471,8 @@ void Tracking::Track()
                     }
                     else
                     {
-                        // Relocalization
-                        bOK = Relocalization();
+                        // Relocalization ([OA-SLAM] points, objects or both)
+                        bOK = RelocalizationWithMode();
                         //std::cout << "mCurrentFrame.mTimeStamp:" << to_string(mCurrentFrame.mTimeStamp) << std::endl;
                         //std::cout << "mTimeStampLost:" << to_string(mTimeStampLost) << std::endl;
                         if(mCurrentFrame.mTimeStamp-mTimeStampLost>3.0f && !bOK)
@@ -2040,7 +2512,7 @@ void Tracking::Track()
             {
                 if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
                     Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
-                bOK = Relocalization();
+                bOK = RelocalizationWithMode();
             }
             else
             {
@@ -2197,8 +2669,8 @@ void Tracking::Track()
         vdLMTrack_ms.push_back(timeLMTrack);
 #endif
 
-        // Update drawer
-        mpFrameDrawer->Update(this);
+        // Update drawer: [OA-SLAM] done after the object tracking (GrabImage*)
+        // mpFrameDrawer->Update(this);
         if(mCurrentFrame.isSet())
             mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.GetPose());
 
@@ -2247,7 +2719,10 @@ void Tracking::Track()
             // if(bNeedKF && bOK)
             if(bNeedKF && (bOK || (mInsertKFsLost && mState==RECENTLY_LOST &&
                                    (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))))
+            {
                 CreateNewKeyFrame();
+                createdNewKeyFrame_ = true;
+            }
 
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndNewKF = std::chrono::steady_clock::now();
@@ -2300,7 +2775,7 @@ void Tracking::Track()
     if(mState==OK || mState==RECENTLY_LOST)
     {
         // Store frame pose information to retrieve the complete camera trajectory afterwards.
-        if(mCurrentFrame.isSet())
+        if(mCurrentFrame.isSet() && mCurrentFrame.mpReferenceKF)
         {
             Sophus::SE3f Tcr_ = mCurrentFrame.GetPose() * mCurrentFrame.mpReferenceKF->GetPoseInverse();
             mlRelativeFramePoses.push_back(Tcr_);
@@ -2308,7 +2783,7 @@ void Tracking::Track()
             mlFrameTimes.push_back(mCurrentFrame.mTimeStamp);
             mlbLost.push_back(mState==LOST);
         }
-        else
+        else if(!mlRelativeFramePoses.empty())
         {
             // This can happen if tracking is lost
             mlRelativeFramePoses.push_back(mlRelativeFramePoses.back());
@@ -3606,6 +4081,97 @@ void Tracking::UpdateLocalKeyFrames()
     }
 }
 
+bool Tracking::RelocalizationFromObjects(bool use_points)
+{
+    std::vector<BBox2, Eigen::aligned_allocator<BBox2>> bboxes;
+    std::vector<size_t> bboxes_categories;
+    for (auto det : current_frame_good_detections_) {
+        if (det->score > 0.1) {
+            bboxes.push_back(det->bbox);
+            bboxes_categories.push_back(det->category_id);
+        }
+    }
+    Map* pMap = mpAtlas->GetCurrentMap();
+    std::vector<Ellipsoid, Eigen::aligned_allocator<Ellipsoid>> ellipsoids;
+    std::vector<size_t> ellipsoids_categories;
+    auto objects = pMap->GetAllMapObjects();
+    for (auto* obj : objects) {
+        ellipsoids.push_back(obj->GetEllipsoid());
+        ellipsoids_categories.push_back(obj->GetTrack()->GetCategoryId());
+    }
+    std::cout << "Nb detections / ellipsoids = " << bboxes.size() << " / " << ellipsoids.size() << "\n";
+
+    auto [best_index, poses, scores, used_pairs, used_inliers]
+        = ORB_SLAM3::solveP3P_ransac(ellipsoids, ellipsoids_categories, bboxes, bboxes_categories, K_, 0.2);
+
+    if (best_index == -1 || poses.size() == 0 || scores[best_index] > bboxes.size())
+        return false; // reloc failed
+
+    std::vector<int> indices(poses.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::sort(indices.begin(), indices.end(), [&scores](int a, int b) {
+        return scores[a] < scores[b];
+    });
+
+    Sophus::SE3f best_Tcw_objects;
+    for (size_t i = 0; i < indices.size() && scores[indices[i]] < bboxes.size(); ++i) {
+        int best_index = indices[i]; // current index
+
+        const auto& pose_est = poses[best_index];
+        Eigen::Matrix3d o_est = pose_est.block<3, 3>(0, 0);
+        Eigen::Vector3d p_est = pose_est.col(3);
+        Matrix34d Rt_est;
+        Rt_est << o_est.transpose(), -o_est.transpose() * p_est;
+        Sophus::SE3f Tcw = RtToSE3(Rt_est);
+        mCurrentFrame.SetPose(Tcw);
+
+        // Optimize camera pose by minimizing object reprojection error
+        std::vector<Ellipse, Eigen::aligned_allocator<Ellipse>> ellipses_inliers;
+        std::vector<Ellipsoid, Eigen::aligned_allocator<Ellipsoid>> ellipsoids_inliers;
+        for (auto x : used_inliers[best_index]) {
+            Ellipse ellipse = Ellipse::FromBbox(bboxes[x.first]);
+            ellipses_inliers.push_back(ellipse);
+            ellipsoids_inliers.push_back(ellipsoids[x.second]);
+        }
+
+        Tcw = OptimizePoseFromObjects(ellipses_inliers, ellipsoids_inliers, Tcw, K_);
+        mCurrentFrame.SetPose(Tcw);
+
+        if (i == 0) {
+            best_Tcw_objects = Tcw;
+        }
+        // Match keypoints from the current frame to map points using the estimated pose
+        auto map_points = pMap->GetAllMapPoints();
+        ORBmatcher matcher(0.9, true);
+        int nb_matches = matcher.SearchByProjectionAllPoints(mCurrentFrame, map_points, 10, 100);
+        std::cout << nb_matches << " matched points by projection.\n";
+
+        if (nb_matches > 10) // the pose is considered as good, we can stop
+        {
+            if (use_points) {
+                // further optimization
+                Optimizer::PoseOptimization(&mCurrentFrame);
+                std::cout << "Optimized pose using matched map points.\n";
+            }
+
+            mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.GetPose());
+            // mnLastRelocFrameId = mCurrentFrame.mnId; // causes problems to resume tracking
+            return true;
+        }
+    }
+
+    mCurrentFrame.SetPose(best_Tcw_objects);
+    mpMapDrawer->SetCurrentCameraPose(mCurrentFrame.GetPose());
+    // mnLastRelocFrameId = mCurrentFrame.mnId; // cause problems to resume tracking
+
+    return true;
+}
+
+void Tracking::SetLocalObjectMapper(LocalObjectMapping *obj_mapper)
+{
+    local_object_mapper_ = obj_mapper;
+}
+
 bool Tracking::Relocalization()
 {
     Verbose::PrintMess("Starting relocalization", Verbose::VERBOSITY_NORMAL);
@@ -3801,6 +4367,13 @@ void Tracking::Reset(bool bLocMap)
     mpLoopClosing->RequestReset();
     Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
 
+    // [OA-SLAM] Reset Local Object Mapping
+    if (local_object_mapper_) {
+        Verbose::PrintMess("Reseting Local Object Mapper...", Verbose::VERBOSITY_NORMAL);
+        local_object_mapper_->RequestReset();
+        Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+    }
+
     // Clear BoW Database
     Verbose::PrintMess("Reseting Database...", Verbose::VERBOSITY_NORMAL);
     mpKeyFrameDB->clear();
@@ -3831,6 +4404,9 @@ void Tracking::Reset(bool bLocMap)
     mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
     mvIniMatches.clear();
 
+    // [OA-SLAM] the objects are freed with their tracks
+    objectTracks_.clear();
+
     if(mpViewer)
         mpViewer->Release();
 
@@ -3860,6 +4436,14 @@ void Tracking::ResetActiveMap(bool bLocMap)
     Verbose::PrintMess("Reseting Loop Closing...", Verbose::VERBOSITY_NORMAL);
     mpLoopClosing->RequestResetActiveMap(pMap);
     Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+
+    // [OA-SLAM] Reset Local Object Mapping and remove the tracks of the active map
+    if (local_object_mapper_) {
+        Verbose::PrintMess("Reseting Local Object Mapper...", Verbose::VERBOSITY_NORMAL);
+        local_object_mapper_->RequestReset();
+        Verbose::PrintMess("done", Verbose::VERBOSITY_NORMAL);
+    }
+    objectTracks_.remove_if([pMap](const ObjectTrack::Ptr& tr) { return tr->GetMap() == pMap; });
 
     // Clear BoW Database
     Verbose::PrintMess("Reseting Database", Verbose::VERBOSITY_NORMAL);

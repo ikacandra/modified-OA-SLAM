@@ -26,7 +26,7 @@
 
 #include <opencv2/core.hpp>
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
 

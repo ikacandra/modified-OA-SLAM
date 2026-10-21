@@ -21,7 +21,7 @@
 #include "Ellipse.h"
 
 
-namespace ORB_SLAM2
+namespace ORB_SLAM3
 {
 
     Ellipse::Ellipse(const Eigen::Vector2d& axes, double angle, const Eigen::Vector2d& center) {

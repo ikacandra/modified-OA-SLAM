@@ -33,18 +33,27 @@
 #include <boost/archive/xml_iarchive.hpp>
 #include <boost/archive/xml_oarchive.hpp>
 
+// [OA-SLAM]
+#include <nlohmann/json.hpp>
+#include "LocalObjectMapping.h"
+#include "MapObject.h"
+#include "ObjectTrack.h"
+#include "ColorManager.h"
+#include "Utils.h"
+
 namespace ORB_SLAM3
 {
 
 Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
-               const bool bUseViewer, const int initFr, const string &strSequence):
+               const bool bUseViewer, const int initFr, const string &strSequence, const bool bUseObjectMapping):
     mSensor(sensor), mpViewer(static_cast<Viewer*>(NULL)), mbReset(false), mbResetActiveMap(false),
     mbActivateLocalizationMode(false), mbDeactivateLocalizationMode(false), mbShutDown(false)
 {
     // Output welcome message
     cout << endl <<
+    "OA-SLAM (object-aware SLAM, Matthieu Zins, Inria) with an ORB-SLAM3 backbone and YOLOv8n-seg detections." << endl <<
     "ORB-SLAM3 Copyright (C) 2017-2020 Carlos Campos, Richard Elvira, Juan J. Gómez, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
     "ORB-SLAM2 Copyright (C) 2014-2016 Raúl Mur-Artal, José M.M. Montiel and Juan D. Tardós, University of Zaragoza." << endl <<
     "This program comes with ABSOLUTELY NO WARRANTY;" << endl  <<
@@ -223,6 +232,13 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     mpLoopCloser->SetTracker(mpTracker);
     mpLoopCloser->SetLocalMapper(mpLocalMapper);
 
+    // [OA-SLAM] Initialize the Local Object Mapping thread and launch
+    if (bUseObjectMapping) {
+        local_object_mapper_ = new LocalObjectMapping(mpTracker);
+        local_object_mapping_ = new thread(&ORB_SLAM3::LocalObjectMapping::Run, local_object_mapper_);
+    }
+    mpTracker->SetLocalObjectMapper(local_object_mapper_);
+
     //usleep(10*1000*1000);
 
     //Initialize the Viewer thread and launch
@@ -327,6 +343,13 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
 
 Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const double &timestamp, const vector<IMU::Point>& vImuMeas, string filename)
 {
+    return TrackRGBD(im, depthmap, timestamp, {}, false, vImuMeas, filename);
+}
+
+Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const double &timestamp,
+                               const std::vector<Detection::Ptr>& detections, bool force_relocalize,
+                               const vector<IMU::Point>& vImuMeas, string filename)
+{
     if(mSensor!=RGBD  && mSensor!=IMU_RGBD)
     {
         cerr << "ERROR: you called TrackRGBD but input sensor was not set to RGBD." << endl;
@@ -387,7 +410,10 @@ Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const
         for(size_t i_imu = 0; i_imu < vImuMeas.size(); i_imu++)
             mpTracker->GrabImuData(vImuMeas[i_imu]);
 
-    Sophus::SE3f Tcw = mpTracker->GrabImageRGBD(imToFeed,imDepthToFeed,timestamp,filename);
+    // [OA-SLAM] Pause / Quit buttons of the map viewer
+    CheckViewerPauseQuit();
+
+    Sophus::SE3f Tcw = mpTracker->GrabImageRGBD(imToFeed,imDepthToFeed,timestamp,filename,detections,force_relocalize);
 
     unique_lock<mutex> lock2(mMutexState);
     mTrackingState = mpTracker->mState;
@@ -397,6 +423,13 @@ Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const
 }
 
 Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, const vector<IMU::Point>& vImuMeas, string filename)
+{
+    return TrackMonocular(im, timestamp, {}, false, vImuMeas, filename);
+}
+
+Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp,
+                                    const std::vector<Detection::Ptr>& detections, bool force_relocalize,
+                                    const vector<IMU::Point>& vImuMeas, string filename)
 {
 
     {
@@ -463,7 +496,10 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
         for(size_t i_imu = 0; i_imu < vImuMeas.size(); i_imu++)
             mpTracker->GrabImuData(vImuMeas[i_imu]);
 
-    Sophus::SE3f Tcw = mpTracker->GrabImageMonocular(imToFeed,timestamp,filename);
+    // [OA-SLAM] Pause / Quit buttons of the map viewer
+    CheckViewerPauseQuit();
+
+    Sophus::SE3f Tcw = mpTracker->GrabImageMonocular(imToFeed,timestamp,filename,detections,force_relocalize);
 
     unique_lock<mutex> lock2(mMutexState);
     mTrackingState = mpTracker->mState;
@@ -523,12 +559,27 @@ void System::Shutdown()
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
-    /*if(mpViewer)
+    if (local_object_mapper_)
+        local_object_mapper_->RequestFinish();
+
+    // [OA-SLAM] The viewer is closed by the user (Quit button) or by RequestViewerFinish()
+    if(mpViewer)
     {
-        mpViewer->RequestFinish();
         while(!mpViewer->isFinished())
             usleep(5000);
-    }*/
+    }
+
+    // [OA-SLAM] Wait until all thread have effectively stopped, so that the saved
+    // trajectories and objects are not modified any more
+    while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
+    {
+        usleep(5000);
+    }
+    if (local_object_mapper_)
+    {
+        while(!local_object_mapper_->isFinished())
+            usleep(5000);
+    }
 
     // Wait until all thread have effectively stopped
     /*while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
@@ -564,6 +615,151 @@ void System::Shutdown()
 bool System::isShutDown() {
     unique_lock<mutex> lock(mMutexReset);
     return mbShutDown;
+}
+
+void System::CheckViewerPauseQuit()
+{
+    if (!mpViewer)
+        return;
+
+    // Check if need pause
+    while(mpViewer->isPaused() && !mpViewer->isStopped() && !mpViewer->isFinished())
+        usleep(90000);
+
+    // Check if quit
+    if (mpViewer->CheckFinish() && !mShouldQuit)
+    {
+        std::cout << "SHUTDOWN" << std::endl;
+        mShouldQuit = true;
+    }
+}
+
+void System::RequestViewerFinish()
+{
+    if (mpViewer)
+        mpViewer->RequestFinish();
+}
+
+void System::SaveKeyFrameTrajectoryJSON(const string &filename, const std::vector<std::string>& frames_filenames)
+{
+    vector<KeyFrame*> vpKFs = mpAtlas->GetAllKeyFrames();
+    sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
+
+    nlohmann::json json_data;
+    for(size_t i=0; i<vpKFs.size(); i++)
+    {
+        KeyFrame* pKF = vpKFs[i];
+        if(pKF->isBad() || pKF->mnFrameId >= frames_filenames.size())
+            continue;
+
+        Eigen::Matrix4d m = pKF->GetPose().matrix().cast<double>();
+        nlohmann::json R({{m(0, 0), m(0, 1), m(0, 2)},
+                          {m(1, 0), m(1, 1), m(1, 2)},
+                          {m(2, 0), m(2, 1), m(2, 2)}});
+        nlohmann::json t({m(0, 3), m(1, 3), m(2, 3)});
+        nlohmann::json image_data;
+        image_data["file_name"] = frames_filenames[pKF->mnFrameId];
+        image_data["R"] = R;
+        image_data["t"] = t;
+        json_data.push_back(image_data);
+    }
+
+    std::ofstream json_file(filename);
+    json_file << json_data;
+    json_file.close();
+
+    cout << "Saved keyframe trajectory to " << filename << endl;
+}
+
+void System::SaveMapPointsOBJ(const string &filename)
+{
+    vector<MapPoint*> vpMPs = mpAtlas->GetAllMapPoints();
+
+    ofstream f;
+    f.open(filename.c_str());
+    f << fixed;
+
+    for(size_t i=0; i<vpMPs.size(); i++) {
+        MapPoint* pMP = vpMPs[i];
+        if(pMP->isBad())
+            continue;
+        Eigen::Vector3f pos = pMP->GetWorldPos();
+        f << "v " << setprecision(7) << " " << pos(0) << " " << pos(1) << " " << pos(2) << endl;
+    }
+
+    f.close();
+    cout << "Save map points in " << filename << endl;
+}
+
+void System::SaveMapObjectsOBJ(const string& filename)
+{
+    std::ofstream f;
+    f.open(filename.c_str());
+    f << fixed;
+
+    for (Map* pMap : mpAtlas->GetAllMaps()) {
+        for (MapObject* obj : pMap->GetAllMapObjects()) {
+            if (obj->GetTrack()->IsBad())
+                continue;
+
+            const cv::Scalar& c = obj->GetTrack()->GetColor();
+            auto pts = obj->GetEllipsoid().GeneratePointCloud(200);
+            for (int j = 0; j < pts.rows(); ++j) {
+                f << "v " << setprecision(7) << " "<< pts(j, 0)
+                                            << " " << pts(j, 1)
+                                            << " " << pts(j, 2)
+                                            << " " << c[2]
+                                            << " " << c[1]
+                                            << " " << c[0] << endl;
+            }
+        }
+    }
+    f.close();
+    cout << "Save map objects in " << filename << endl;
+}
+
+void System::SaveMapObjectsTXT(const std::string& filename)
+{
+    std::ofstream f;
+    f.open(filename.c_str());
+    f << fixed;
+
+    // one line per object: id category_id Q (dual quadric, 16 values, column-major)
+    for (Map* pMap : mpAtlas->GetAllMaps()) {
+        for (MapObject* obj : pMap->GetAllMapObjects()) {
+            if (obj->GetTrack()->IsBad())
+                continue;
+            const auto ell = obj->GetEllipsoid();
+            f << obj->GetTrack()->GetId() << " "
+              << obj->GetTrack()->GetCategoryId();
+            Eigen::Matrix4d Q = ell.AsDual();
+            double *p = Q.data();
+            for (int i = 0; i < 16; ++i) {
+                f << setprecision(8) << " " << p[i];
+            }
+            f << "\n";
+        }
+    }
+    f.close();
+    cout << "Save map objects in " << filename << endl;
+}
+
+void System::remove_nth_object_by_cat(int cat, int nth)
+{
+    Map* pMap = mpAtlas->GetCurrentMap();
+    auto objects = pMap->GetAllMapObjects();
+    int i = 0;
+    for (auto o : objects)
+    {
+        if (static_cast<int>(o->GetTrack()->GetCategoryId()) == cat) {
+            std::cout << "Object " << o->GetTrack()->GetId() << " is from  cat " << o->GetTrack()->GetCategoryId() << "\n";
+            ++i;
+            if (i == nth) {
+                std::cout << "Object deleted.\n";
+                pMap->EraseMapObject(o);
+            }
+        }
+    }
 }
 
 void System::SaveTrajectoryTUM(const string &filename)

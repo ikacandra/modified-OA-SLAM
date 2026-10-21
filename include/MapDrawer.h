@@ -43,7 +43,18 @@ public:
 
     Atlas* mpAtlas;
 
-    void DrawMapPoints();
+    // [OA-SLAM] ignore_objects_points: do not draw the points associated to objects
+    // (they are drawn by DrawMapObjectsPoints with the object color)
+    void DrawMapPoints(double size, bool ignore_objects_points);
+    void DrawMapObjectsPoints(double size);
+    void DrawMapObjects();
+    void DrawDistanceEstimation(double depth);
+    void SetUseCategoryColors(bool use_cat_cols) {
+        use_category_cols_ = use_cat_cols;
+    }
+    void SetDisplay3DBbox(bool disp_bbox) {
+        display_3d_bbox_ = disp_bbox;
+    }
     void DrawKeyFrames(const bool bDrawKF, const bool bDrawGraph, const bool bDrawInertialGraph, const bool bDrawOptLba);
     void DrawCurrentCamera(pangolin::OpenGlMatrix &Twc);
     void SetCurrentCameraPose(const Sophus::SE3f &Tcw);
@@ -64,6 +75,9 @@ private:
     Sophus::SE3f mCameraPose;
 
     std::mutex mMutexCamera;
+
+    bool use_category_cols_ = false;
+    bool display_3d_bbox_ = false;
 
     float mfFrameColors[6][3] = {{0.0f, 0.0f, 1.0f},
                                 {0.8f, 0.4f, 1.0f},
