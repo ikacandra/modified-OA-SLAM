@@ -222,6 +222,8 @@ public:
 
     // RGB image of the current frame (for the frame drawer)
     cv::Mat im_rgb_;
+    // Depth of the current frame in meters (RGB-D only, for the depth view)
+    cv::Mat im_depth_;
 
     bool mbWriteStats;
 

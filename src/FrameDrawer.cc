@@ -469,6 +469,12 @@ void FrameDrawer::Update(Tracking *pTracker)
     detections_widgets_.clear();
 
     const auto& detections = pTracker->GetCurrentFrameDetections();
+    masks_.clear();
+    for (auto det : detections) {
+        if (!det->mask.empty())
+            masks_.emplace_back(det->mask, det->category_id);   // shared data, not modified later
+    }
+    depth_ = pTracker->im_depth_;
     for (auto det : detections) {
         detections_widgets_.push_back(DetectionWidget(det->bbox, 0, det->category_id,
                                         det->score, cv::Scalar(0, 0, 0),
@@ -530,6 +536,62 @@ cv::Mat FrameDrawer::DrawDetections(cv::Mat img)
         }
     }
     return img;
+}
+
+cv::Mat FrameDrawer::DrawMasks(cv::Mat img)
+{
+    std::vector<std::pair<cv::Mat, unsigned int>> masks;
+    {
+        unique_lock<mutex> lock(mMutex);
+        masks = masks_;
+    }
+    const auto& manager = CategoryColorsManager::GetInstance();
+    for (const auto& m : masks) {
+        const cv::Mat& mask = m.first;
+        if (mask.rows > img.rows || mask.cols > img.cols)
+            continue;
+        cv::Mat bin = mask > 0;
+        // persons (dynamic, keypoints removed) in red, other categories with their color
+        cv::Scalar color = m.second == 0 ? cv::Scalar(0, 0, 255) : manager[m.second];
+        cv::Mat roi = img(cv::Rect(0, 0, mask.cols, mask.rows));
+        cv::Mat colored(roi.size(), roi.type(), color);
+        cv::Mat blended;
+        cv::addWeighted(roi, 0.55, colored, 0.45, 0.0, blended);
+        blended.copyTo(roi, bin);
+        std::vector<std::vector<cv::Point>> contours;
+        cv::findContours(bin, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+        cv::drawContours(roi, contours, -1, color, 1);
+    }
+    return img;
+}
+
+cv::Mat FrameDrawer::DrawDepth(float max_depth)
+{
+    cv::Mat depth;
+    std::vector<DetectionWidget, Eigen::aligned_allocator<DetectionWidget>> detections;
+    {
+        unique_lock<mutex> lock(mMutex);
+        depth = depth_;
+        detections = detections_widgets_;
+    }
+    if (depth.empty())
+        return cv::Mat();
+
+    cv::Mat depth8, colored;
+    depth.convertTo(depth8, CV_8U, 255.0 / max_depth);
+    cv::applyColorMap(depth8, colored, cv::COLORMAP_JET);
+    colored.setTo(cv::Scalar(0, 0, 0), depth <= 0);   // no depth: black
+
+    for (const auto& d : detections) {
+        if (!d.display_info)   // object tracks only (raw detections are drawn on the RGB view)
+            continue;
+        cv::rectangle(colored, cv::Point2i(d.bbox[0], d.bbox[1]), cv::Point2i(d.bbox[2], d.bbox[3]),
+                      cv::Scalar(255, 255, 255), 2);
+    }
+    std::stringstream ss;
+    ss << "depth 0 - " << std::fixed << std::setprecision(1) << max_depth << " m | FRAME " << frame_id_;
+    cv::putText(colored, ss.str(), cv::Point(5, 20), cv::FONT_HERSHEY_PLAIN, 1.2, cv::Scalar(255, 255, 255), 1);
+    return colored;
 }
 
 static void draw_ellipse_dashed(cv::Mat img, const Ellipse& ell, const cv::Scalar& color, int thickness)

@@ -253,6 +253,14 @@ std::vector<Detection::Ptr> decodeYoloSeg(const cv::Mat& output_dets, const cv::
                 
                 cv::threshold(resized_mask, final_mask, 0.5, 255, cv::THRESH_BINARY);
                 final_mask.convertTo(final_mask, CV_8U);
+
+                // Keep the mask only inside its bounding box (crop_mask of the YOLOv8 post-processing).
+                // Without it the prototype combination leaks over the background.
+                cv::Rect inside = box & cv::Rect(0, 0, final_mask.cols, final_mask.rows);
+                cv::Mat cropped = cv::Mat::zeros(final_mask.size(), CV_8U);
+                if (inside.area() > 0)
+                    final_mask(inside).copyTo(cropped(inside));
+                final_mask = cropped;
                 
                 if (final_mask.empty()) {
                     std::cout << "[DEBUG] Mask EMPTY for class " << class_ids[idx] << std::endl;

@@ -192,7 +192,9 @@ void Viewer::Run()
     // [OA-SLAM] "Stop" (shutdown from the viewer thread) is replaced by Pause / Quit
     pangolin::Var<bool> menuPause("menu.Pause",false,true);
     pangolin::Var<bool> menuCatCol("menu.Color by Cat", false, true);
-    pangolin::Var<bool> menu3DBbox("menu.Disp 3D Bboxes", false, true);
+    pangolin::Var<bool> menu3DBbox("menu.Disp 3D Bboxes", true, true);
+    pangolin::Var<bool> menuShowMasks("menu.Show Masks", true, true);
+    pangolin::Var<bool> menuShowDepth("menu.Show Depth", true, true);
     pangolin::Var<bool> menuDistEstim("menu.Disp Distance Est.", false, true);
     pangolin::Var<bool> menuQuit("menu.Quit",false,false);
     pangolin::Var<bool> menuStepByStep("menu.Step By Step",false,true);  // false, true
@@ -335,6 +337,8 @@ void Viewer::Run()
 
         cv::Mat toShow;
         cv::Mat im = mpFrameDrawer->DrawFrame(trackedImageScale);
+        if(menuShowMasks)
+            mpFrameDrawer->DrawMasks(im);
         if(menuShowObjects)
         {
             mpFrameDrawer->DrawDetections(im);
@@ -357,6 +361,27 @@ void Viewer::Run()
         }
 
         cv::imshow("OA-SLAM: Current Frame",toShow);
+        if(menuShowDepth)
+        {
+            cv::Mat imDepth = mpFrameDrawer->DrawDepth();
+            if(!imDepth.empty())
+            {
+                cv::imshow("OA-SLAM: Depth",imDepth);
+                static bool depth_placed = false;
+                if(!depth_placed)
+                {
+                    // right of the map viewer, below the current frame
+                    cv::moveWindow("OA-SLAM: Depth", 1040, toShow.rows + 90);
+                    depth_placed = true;
+                }
+            }
+        }
+        static bool frame_placed = false;
+        if(!frame_placed)
+        {
+            cv::moveWindow("OA-SLAM: Current Frame", 1040, 30);
+            frame_placed = true;
+        }
         cv::waitKey(mT);
 
         if(menuReset)

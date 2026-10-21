@@ -85,6 +85,10 @@ public:
     // [OA-SLAM]
     cv::Mat DrawDetections(cv::Mat img);
     cv::Mat DrawProjections(cv::Mat img);
+    // Instance segmentation masks of the detections (persons included), blended on the image
+    cv::Mat DrawMasks(cv::Mat img);
+    // Colored depth map (RGB-D) with the detection boxes; empty without depth
+    cv::Mat DrawDepth(float max_depth = 5.0f);
 
     void SetUseCategoryColors(bool use_cat_cols) {
         use_category_cols_ = use_cat_cols;
@@ -129,6 +133,8 @@ protected:
     std::vector<ObjectProjectionWidget, Eigen::aligned_allocator<ObjectProjectionWidget>> object_projections_widgets_;
     bool use_category_cols_ = false;
     int frame_id_ = 0;
+    std::vector<std::pair<cv::Mat, unsigned int>> masks_;   // mask, category id
+    cv::Mat depth_;
 
     // AprilTag bounding boxes for visualization (red keypoints)
     std::vector<cv::Rect> mvAprilTagBboxes;

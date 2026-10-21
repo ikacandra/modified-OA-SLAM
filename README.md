@@ -42,8 +42,13 @@ Every change in the ORB-SLAM3 sources is marked with `[OA-SLAM]` or `[ADAPTIVE W
   when tracking is lost and ORB-SLAM3 starts a new map, objects stay in their map. When LoopClosing merges
   the active map into an older one (`MergeLocal`), the objects are moved and their ellipsoids are
   transformed with the merge similarity. `ResetActiveMap` removes the objects of that map.
-- **Viewer**: ellipsoids, object points, detections and projected ellipses as in OA-SLAM, with the
-  `Pause`, `Quit`, `Color by Cat`, `Disp 3D Bboxes` menu entries.
+- **Viewer**: map window with the ellipsoids (quadrics) and their 3D oriented boxes, object points,
+  keyframes; *Current Frame* window with the instance masks (persons in red), detection / track boxes and
+  the projected ellipses (solid: in the map, dashed: being initialized); *Depth* window (0-5 m colormap with
+  the track boxes). Menu entries: `Show Masks`, `Show Depth`, `Disp 3D Bboxes`, `Color by Cat`, `Pause`, `Quit`.
+- **Mask crop fix** (`decodeYoloSeg`): the YOLOv8-seg masks are cropped to their boxes, as `crop_mask` in
+  Ultralytics. OA-SLAM-InstanceSeg did not crop them, so person masks leaked over the background and removed
+  static keypoints. The ORB-SLAM2 results (`OA-SLAM-Yolov8nSegFP16`) were obtained without this fix.
 
 Not ported (tied to ORB-SLAM2 internals): Osmap map saving/loading, the `oa-slam_localization` example, the Dockerfile,
 the AR viewer, the ROS 2 node, and objects in the local bundle adjustment (`use_objects_in_local_BA` 1/2;

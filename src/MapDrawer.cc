@@ -255,7 +255,8 @@ void MapDrawer::DrawMapObjects()
                   static_cast<double>(c(1)) / 255,
                   static_cast<double>(c(0)) / 255);
         const Ellipsoid ell = obj->GetEllipsoid();
-        if (!display_3d_bbox_) {
+        // [OA-SLAM] ellipsoid (quadric), plus its 3D oriented bounding box if requested
+        {
             auto pts = ell.GeneratePointCloud();
             int i = 0;
             while (i < pts.rows()) {
@@ -265,7 +266,8 @@ void MapDrawer::DrawMapObjects()
                 }
                 glEnd();
             }
-        } else {
+        }
+        if (display_3d_bbox_) {
             Eigen::Vector3d center = ell.GetCenter();
             Eigen::Vector3d axes = ell.GetAxes();
             Eigen::Matrix3d R = ell.GetOrientation();
