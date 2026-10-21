@@ -1,0 +1,10 @@
+build/
+bin/
+lib/
+Thirdparty/*/build/
+Thirdparty/*/lib/
+Thirdparty/g2o/config.h
+Vocabulary/ORBvoc.txt
+models/*.engine
+models/*.pt
+*.log

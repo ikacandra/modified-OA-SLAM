@@ -459,7 +459,9 @@ void KeyFrame::SetBadFlag()
 {   
     {
         unique_lock<mutex> lock(mMutexConnections);
-        if(mnId==0)
+        // A keyframe that never got a covisibility connection has no parent in the
+        // spanning tree (mpParent == NULL): culling it would dereference NULL below.
+        if(mnId==0 || !mpParent)
             return;
         else if(mbNotErase)
         {

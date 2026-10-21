@@ -158,6 +158,10 @@ public:
 
     void SaveMapPointsOBJ(const string &filename);
 
+    // Close the map viewer (it otherwise waits for the user to press Quit).
+    // Call before Shutdown() for unattended runs.
+    void RequestViewerFinish();
+
     bool ShouldQuit() const {
          return mShouldQuit;
     }

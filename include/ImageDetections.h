@@ -24,6 +24,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <unordered_set>
 #include <Eigen/Dense>
 #include <nlohmann/json.hpp>
 
@@ -69,6 +70,14 @@ public:
     virtual std::vector<Detection::Ptr> detect(unsigned int idx) const = 0;
     virtual std::vector<Detection::Ptr> detect(cv::Mat img) const = 0;
 };
+
+
+// YOLOv8-seg post-processing (transpose, scoring, NMS, mask decoding) shared by the
+// OpenCV DNN (ObjectDetector) and TensorRT (TRTDetector) backends.
+std::vector<Detection::Ptr> decodeYoloSeg(const cv::Mat& output_dets, const cv::Mat& output_masks_proto,
+                                          int original_width, int original_height,
+                                          int input_width, int input_height,
+                                          const std::unordered_set<int>& ignored_cats);
 
 
 class DetectionsFromFile : public ImageDetectionsManager

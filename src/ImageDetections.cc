@@ -128,59 +128,17 @@ std::vector<Detection::Ptr> DetectionsFromFile::detect(unsigned int idx) const {
 }
 
 
-#ifdef USE_DNN
-
-ObjectDetector::ObjectDetector(const std::string& model, const std::vector<int>& cats_to_ignore) 
-    : network_(std::make_unique<cv::dnn::Net>()), ignored_cats_(cats_to_ignore.begin(), cats_to_ignore.end()), ImageDetectionsManager()
+// ================= YOLOv8-seg POST-PROCESSING =================
+// Shared by ObjectDetector (OpenCV DNN) and TRTDetector (TensorRT) so both backends
+// only differ in the forward pass.
+// output_dets: [1, 4 + NumClasses + 32, NumAnchors], output_masks_proto: [1, 32, mask_h, mask_w]
+std::vector<Detection::Ptr> decodeYoloSeg(const cv::Mat& output_dets, const cv::Mat& output_masks_proto,
+                                          int original_width, int original_height,
+                                          int INPUT_WIDTH, int INPUT_HEIGHT,
+                                          const std::unordered_set<int>& ignored_cats_)
 {
-    if (model.substr(model.size()-4) == "onnx")
-        *network_ =  cv::dnn::readNet(model);
-    else
-        *network_ =  cv::dnn::readNetFromDarknet(model + ".cfg", model + ".weights");
-    
-    // Try to use CUDA if available
-    network_->setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
-    network_->setPreferableTarget(cv::dnn::DNN_TARGET_CUDA);
-}
-
-std::vector<Detection::Ptr> ObjectDetector::detect(cv::Mat img) const
-{
-    // Settings for YOLOv8
-    const int INPUT_WIDTH = 640; 
-    const int INPUT_HEIGHT = 640;
     const float SCORE_THRESHOLD = 0.5;
     const float NMS_THRESHOLD = 0.45; 
-
-    int original_width = img.cols;
-    int original_height = img.rows;
-
-    // Preprocessing
-    cv::Mat blob;
-    cv::dnn::blobFromImage(img, blob, 1./255.0, cv::Size(INPUT_WIDTH, INPUT_HEIGHT), cv::Scalar(), true, false);
-    
-    network_->setInput(blob);
-
-    // Forward pass - Requesting all outputs
-    std::vector<cv::Mat> outputs;
-    // For YOLOv8-seg, we usually have 2 outputs: detections and proto-masks
-    // If names are not known, getUnconnectedOutLayersNames() is safest
-    std::vector<std::string> out_names = network_->getUnconnectedOutLayersNames();
-    
-    network_->forward(outputs, out_names);
-
-    // Expecting at least 2 outputs for Segmentation model
-    if (outputs.size() < 2) {
-        std::cerr << "Error: Expected at least 2 outputs for YOLOv8 Segmentation model. Got " << outputs.size() << std::endl;
-        // Fallback or empty return if not matching expectation
-        // return {}; 
-        // Proceeding with caution, logic below assumes index 0 is dets and 1 is masks.
-    }
-
-    // Output 0: Detections [Batch, 4 + NumClasses + 32, NumAnchors]
-    // Output 1: Proto-masks [Batch, 32, 160, 160]
-    
-    cv::Mat output_dets = outputs[0];
-    cv::Mat output_masks_proto = outputs[1];
 
     // Reshape Logic
     // Reshape output_dets to [NumAnchors, NumValues]
@@ -324,6 +282,60 @@ std::vector<Detection::Ptr> ObjectDetector::detect(cv::Mat img) const
     }
 
     return detections;
+}
+
+
+#ifdef USE_DNN
+
+ObjectDetector::ObjectDetector(const std::string& model, const std::vector<int>& cats_to_ignore) 
+    : network_(std::make_unique<cv::dnn::Net>()), ignored_cats_(cats_to_ignore.begin(), cats_to_ignore.end()), ImageDetectionsManager()
+{
+    if (model.substr(model.size()-4) == "onnx")
+        *network_ =  cv::dnn::readNet(model);
+    else
+        *network_ =  cv::dnn::readNetFromDarknet(model + ".cfg", model + ".weights");
+    
+    // Try to use CUDA if available
+    network_->setPreferableBackend(cv::dnn::DNN_BACKEND_CUDA);
+    network_->setPreferableTarget(cv::dnn::DNN_TARGET_CUDA);
+}
+
+std::vector<Detection::Ptr> ObjectDetector::detect(cv::Mat img) const
+{
+    // Settings for YOLOv8
+    const int INPUT_WIDTH = 640; 
+    const int INPUT_HEIGHT = 640;
+
+    int original_width = img.cols;
+    int original_height = img.rows;
+
+    // Preprocessing
+    cv::Mat blob;
+    cv::dnn::blobFromImage(img, blob, 1./255.0, cv::Size(INPUT_WIDTH, INPUT_HEIGHT), cv::Scalar(), true, false);
+    
+    network_->setInput(blob);
+
+    // Forward pass - Requesting all outputs
+    std::vector<cv::Mat> outputs;
+    // For YOLOv8-seg, we usually have 2 outputs: detections and proto-masks
+    // If names are not known, getUnconnectedOutLayersNames() is safest
+    std::vector<std::string> out_names = network_->getUnconnectedOutLayersNames();
+    
+    network_->forward(outputs, out_names);
+
+    // Expecting at least 2 outputs for Segmentation model
+    if (outputs.size() < 2) {
+        std::cerr << "Error: Expected at least 2 outputs for YOLOv8 Segmentation model. Got " << outputs.size() << std::endl;
+        // Fallback or empty return if not matching expectation
+        // return {}; 
+        // Proceeding with caution, logic below assumes index 0 is dets and 1 is masks.
+    }
+
+    // Output 0: Detections [Batch, 4 + NumClasses + 32, NumAnchors]
+    // Output 1: Proto-masks [Batch, 32, 160, 160]
+    
+    return decodeYoloSeg(outputs[0], outputs[1], original_width, original_height,
+                         INPUT_WIDTH, INPUT_HEIGHT, ignored_cats_);
 }
 #endif
 

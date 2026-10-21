@@ -70,6 +70,7 @@
 #include <unistd.h>
 #include <dlib/optimization/max_cost_assignment.h>
 #include <chrono>
+#include <cstdlib>
 
 using namespace std;
 
@@ -80,14 +81,29 @@ using std::chrono::milliseconds;
 
 #define OBJECT_CATEGORY_ID  PERSON_CATEGORY_ID  // Thay bằng 0 nếu muốn coi người là vật động
 
-#define APRILTAG_CATEGORY_ID    0
-#define CHAIR_CATEGORY_ID       1
-#define DOOR_CATEGORY_ID        2
-#define PERSON_CATEGORY_ID      3
-#define POTTEDPLANT_CATEGORY_ID 4
+// COCO class ids (stock yolov8n-seg). The custom-model ids were:
+// AprilTag 0, chair 1, door 2, person 3, pottedplant 4.
+// COCO has no AprilTag / door class: 1000 / 1001 are never produced, which disables
+// the AprilTag-weighted pose optimization.
+#define APRILTAG_CATEGORY_ID    1000
+#define CHAIR_CATEGORY_ID       56
+#define DOOR_CATEGORY_ID        1001
+#define PERSON_CATEGORY_ID      0
+#define POTTEDPLANT_CATEGORY_ID 58
 
 namespace ORB_SLAM2
 {
+
+// Ablation parameters (object association), overridable by environment variables.
+// Defaults are the original hardcoded values.
+static double OaEnvParam(const char* name, double def)
+{
+    const char* v = std::getenv(name);
+    return v ? std::atof(v) : def;
+}
+static const double OA_IOU2D = OaEnvParam("OA_IOU2D", 0.2);
+static const double OA_IOU3D = OaEnvParam("OA_IOU3D", 0.3);
+static const int OA_MIN_OBS = static_cast<int>(OaEnvParam("OA_MIN_OBS", 10));
 
 
 Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer, MapDrawer *pMapDrawer, Map *pMap, KeyFrameDatabase* pKFDB, const string &strSettingPath, const int sensor):
@@ -95,6 +111,9 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mpKeyFrameDB(pKFDB), mpInitializer(static_cast<Initializer*>(NULL)), mpSystem(pSys), mpViewer(NULL),
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpMap(pMap), mnLastRelocFrameId(0)
 {
+    std::cout << "EFFECTIVE OA_IOU2D = " << OA_IOU2D << "\n"
+              << "EFFECTIVE OA_IOU3D = " << OA_IOU3D << "\n"
+              << "EFFECTIVE OA_MIN_OBS = " << OA_MIN_OBS << "\n";
     // Load camera parameters from settings file
 
     cv::FileStorage fSettings(strSettingPath, cv::FileStorage::READ);
@@ -331,7 +350,7 @@ cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const d
     mCurrentFrame.mStaticObjectMask = static_object_mask.clone();
 
     // Populate AprilTag bounding boxes (class_id = 0) for weighted pose optimization
-    const int APRILTAG_CLASS_ID = 0;
+    const unsigned int APRILTAG_CLASS_ID = APRILTAG_CATEGORY_ID;
     mCurrentFrame.mvAprilTagBboxes.clear();
     for (const auto& det : current_frame_detections_) {
         if (det->category_id == APRILTAG_CLASS_ID && det->score > 0.5) {
@@ -412,8 +431,8 @@ cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const d
         //     std::cout << "    - tr " << tr->GetId() << " : " << tr->GetNbObservations() << "\n";
         // }
 
-        double MIN_2D_IOU_THRESH = 0.2;
-        double MIN_3D_IOU_THRESH = 0.3;
+        double MIN_2D_IOU_THRESH = OA_IOU2D;
+        double MIN_3D_IOU_THRESH = OA_IOU3D;
         int TIME_DIFF_THRESH = 30;
 
 
@@ -598,7 +617,7 @@ cv::Mat Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, const d
                     for (auto& tr : objectTracks_) {
                         if (tr->GetLastObsFrameId() == current_frame_idx_) {
                             // Try reconstruct from points
-                            if ((tr->GetNbObservations() > 10 && tr->GetStatus() == ObjectTrackStatus::ONLY_2D) ||
+                            if ((tr->GetNbObservations() > OA_MIN_OBS && tr->GetStatus() == ObjectTrackStatus::ONLY_2D) ||
                                 (tr->GetNbObservations() % 2 == 0 && tr->GetStatus() == ObjectTrackStatus::INITIALIZED)) {
                                 // tr->ReconstructFromSamplesEllipsoid();
                                 // tr->ReconstructFromSamplesCenter();
@@ -789,8 +808,8 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
         //     std::cout << "    - tr " << tr->GetId() << " : " << tr->GetNbObservations() << "\n";
         // }
 
-        double MIN_2D_IOU_THRESH = 0.2;
-        double MIN_3D_IOU_THRESH = 0.3;
+        double MIN_2D_IOU_THRESH = OA_IOU2D;
+        double MIN_3D_IOU_THRESH = OA_IOU3D;
         int TIME_DIFF_THRESH = 30;
 
 
@@ -975,7 +994,7 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp,
                     for (auto& tr : objectTracks_) {
                         if (tr->GetLastObsFrameId() == current_frame_idx_) {
                             // Try reconstruct from points
-                            if ((tr->GetNbObservations() > 10 && tr->GetStatus() == ObjectTrackStatus::ONLY_2D) ||
+                            if ((tr->GetNbObservations() > OA_MIN_OBS && tr->GetStatus() == ObjectTrackStatus::ONLY_2D) ||
                                 (tr->GetNbObservations() % 2 == 0 && tr->GetStatus() == ObjectTrackStatus::INITIALIZED)) {
                                 // tr->ReconstructFromSamplesEllipsoid();
                                 // tr->ReconstructFromSamplesCenter();

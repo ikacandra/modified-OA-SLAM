@@ -3,10 +3,16 @@
 #include<fstream>
 #include<chrono>
 #include <stdlib.h>     /* srand, rand */
+#include <csignal>
+#include <iomanip>
+#include <limits>
+#include <execinfo.h>
+#include <unistd.h>
 
 #include<opencv2/core/core.hpp>
 
 #include <ImageDetections.h>
+#include <TRTDetector.h>
 #include <System.h>
 #include "Osmap.h"
 #include <nlohmann/json.hpp>
@@ -21,11 +27,33 @@ using namespace std;
 void LoadImages(const string &strAssociationFilename, vector<string> &vstrImageFilenamesRGB,
                 vector<string> &vstrImageFilenamesD, vector<double> &vTimestamps);
 
+// Epoch seconds (same markers as statistics.txt of ORB-SLAM3 / YDM-SLAM)
+static double epochNow()
+{
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// Print a backtrace on crash so unattended benchmark runs leave a trace in their log.
+static void crashHandler(int sig)
+{
+    void* frames[64];
+    int n = backtrace(frames, 64);
+    const char msg[] = "\n*** Fatal signal, backtrace:\n";
+    write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 int main(int argc, char **argv)
 {
+    signal(SIGSEGV, crashHandler);
+    signal(SIGABRT, crashHandler);
     srand(time(nullptr));
+    const double program_start = epochNow();
+    std::chrono::steady_clock::time_point start_init = std::chrono::steady_clock::now();
     std::cout << "C++ version: " << __cplusplus << std::endl;
-    if(argc != 9) // [FIX] Đổi thành 9 tham số cho chắc (tính cả tên chương trình)
+    if(argc != 9 && argc != 10) // [FIX] Đổi thành 9 tham số cho chắc (tính cả tên chương trình)
     {
         cerr << endl << "Usage:\n"
                         " ./oa-slam_rgbd\n"
@@ -33,10 +61,11 @@ int main(int argc, char **argv)
                         "      camera_file\n"
                         "      path_to_sequence (root folder)\n"
                         "      path_to_association_file (.txt)\n"
-                        "      detections_file (.json or .onnx)\n"
+                        "      detections_file (.json, .onnx or .engine)\n"
                         "      categories_to_ignore_file\n"
                         "      relocalization_mode ('points', 'objects' or 'points+objects')\n"
-                        "      output_name \n";
+                        "      output_name \n"
+                        "      [use_viewer (0: off, 1: on and closed at the end; default: on, waits for Quit)]\n";
         return 1;
     }
 
@@ -48,6 +77,8 @@ int main(int argc, char **argv)
     std::string categories_to_ignore_file(argv[6]);
     string reloc_mode = string(argv[7]);
     string output_name = string(argv[8]);
+    bool use_viewer = argc < 10 || std::string(argv[9]) != "0";
+    bool close_viewer_at_end = argc == 10;
 
     // [FIX 1] Tạo output folder
     string output_folder = output_name;
@@ -99,11 +130,20 @@ int main(int argc, char **argv)
         detector = std::make_shared<ORB_SLAM2::ObjectDetector>(detections_file, classes_to_ignore);
         detect_from_file = false;
         std::cout << "Object detector loaded from ONNX file: " << detections_file << "\n";
+    } else if (extension == "engine") { // TensorRT engine
+#ifdef USE_TENSORRT
+        detector = std::make_shared<ORB_SLAM2::TRTDetector>(detections_file, classes_to_ignore);
+        detect_from_file = false;
+        std::cout << "Object detector loaded from TensorRT engine: " << detections_file << "\n";
+#else
+        std::cerr << "This build has no TensorRT support; .engine models cannot be used.\n";
+        return 1;
+#endif
     } else if (extension == "json") { // load from external detections file
         detector = std::make_shared<ORB_SLAM2::DetectionsFromFile>(detections_file, classes_to_ignore);
         detect_from_file = true;
     } else {
-        std::cout << "Invalid detection file. It should be .json or .onnx\n"
+        std::cout << "Invalid detection file. It should be .json, .onnx or .engine\n"
                       "No detections will be obtained.\n";
     }
 
@@ -121,7 +161,7 @@ int main(int argc, char **argv)
     }
 
     // Create system
-    ORB_SLAM2::System SLAM(vocabulary_file, parameters_file, ORB_SLAM2::System::RGBD, true, false, false);
+    ORB_SLAM2::System SLAM(vocabulary_file, parameters_file, ORB_SLAM2::System::RGBD, use_viewer, false, false);
     std::cout << "System loaded.\n";
     SLAM.SetRelocalizationMode(relocalization_mode);
 
@@ -142,7 +182,19 @@ int main(int argc, char **argv)
     filenames.reserve(nImages);
     std::vector<double> timestamps;
     timestamps.reserve(nImages);
+
+    // Per-frame computation cost (ms): object detection vs. SLAM tracking
+    std::ofstream file_times(output_folder + "frame_times_" + output_name + ".csv");
+    file_times << "frame,timestamp,wall_clock,n_detections,t_detect_ms,t_track_ms,t_total_ms\n";
     
+    // Initialization = program start -> detector + SLAM system ready (vocabulary, engine, threads)
+    std::chrono::steady_clock::time_point end_init = std::chrono::steady_clock::now();
+    const double init_time = std::chrono::duration<double>(end_init - start_init).count();
+    const double loop_start = epochNow();
+    // Per-frame processing time = detection + TrackRGBD (image loading excluded, as in rgbd_tum.cc)
+    std::vector<double> v_t_frame;
+    v_t_frame.reserve(nImages);
+
     int ni = 0;
     while(1){
         if (ni >= nImages) break; // Check bounds
@@ -176,6 +228,7 @@ int main(int argc, char **argv)
         filenames.push_back(filenameIm);
 
         // Get object detections
+        std::chrono::steady_clock::time_point t_det0 = std::chrono::steady_clock::now();
         std::vector<ORB_SLAM2::Detection::Ptr> detections;
         if (detector) {
             if (detect_from_file)
@@ -184,8 +237,11 @@ int main(int argc, char **argv)
                 detections = detector->detect(imRGB);
         }
 
+        std::chrono::steady_clock::time_point t_det1 = std::chrono::steady_clock::now();
+
         // Pass to SLAM
         cv::Mat m = SLAM.TrackRGBD(imRGB, imD, tframe, detections, false);
+        std::chrono::steady_clock::time_point t_trk1 = std::chrono::steady_clock::now();
         
         // [FIX 3] Lưu Pose vào vector poses
         if (!m.empty())
@@ -196,6 +252,13 @@ int main(int argc, char **argv)
         std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
         double ttrack = std::chrono::duration_cast<std::chrono::duration<double> >(t2 - t1).count();
         vTimesTrack.push_back(ttrack);
+        v_t_frame.push_back(std::chrono::duration<double>(t_trk1 - t_det0).count());
+        auto ms = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        double wall_clock = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+        file_times << ni << "," << std::fixed << tframe << "," << wall_clock << "," << detections.size() << ","
+                   << ms(t_det0, t_det1) << "," << ms(t_det1, t_trk1) << "," << ms(t1, t2) << "\n";
         std::cout << "time = " << ttrack << "\n";
 
         if (SLAM.ShouldQuit())
@@ -204,6 +267,10 @@ int main(int argc, char **argv)
         ++ni;
     }
 
+    file_times.close();
+    const double loop_end = epochNow();
+    if (close_viewer_at_end)
+        SLAM.RequestViewerFinish();
     SLAM.Shutdown();
 
     // Save outputs
@@ -251,6 +318,35 @@ int main(int argc, char **argv)
     cout << "-------" << endl << endl;
     cout << "median tracking time: " << vTimesTrack[vTimesTrack.size()/2] << endl;
     cout << "mean tracking time: " << totaltime/vTimesTrack.size() << endl << endl;
+
+    // statistics.txt in the format of ORB-SLAM3 / YDM-SLAM (tracking time = detection + TrackRGBD)
+    {
+        std::vector<double> sorted_t(v_t_frame);
+        std::sort(sorted_t.begin(), sorted_t.end());
+        double sum_t = 0.0, sum_fps = 0.0, max_fps = 0.0, min_fps = std::numeric_limits<double>::max();
+        for (double t : v_t_frame) {
+            double fps = 1.0 / t;
+            sum_t += t;
+            sum_fps += fps;
+            max_fps = std::max(max_fps, fps);
+            min_fps = std::min(min_fps, fps);
+        }
+        const size_t n = std::max<size_t>(v_t_frame.size(), 1);
+        std::ofstream stats_file(output_folder + "statistics.txt");
+        stats_file << std::setprecision(10);
+        stats_file << "-------\n\n";
+        stats_file << "median tracking time: " << (sorted_t.empty() ? 0.0 : sorted_t[sorted_t.size() / 2]) << "\n";
+        stats_file << "mean tracking time: " << sum_t / n << "\n";
+        stats_file << "Total Time: " << std::chrono::duration<double>(std::chrono::steady_clock::now() - start_init).count() << "\n";
+        stats_file << "Initialize time: " << init_time << "\n";
+        stats_file << "mean FPS: " << sum_fps / n << "\n";
+        stats_file << "max FPS: " << max_fps << "\n";
+        stats_file << "min FPS: " << min_fps << "\n";
+        stats_file << std::fixed << std::setprecision(6);
+        stats_file << "program_start: " << program_start << "\n";
+        stats_file << "loop_start: " << loop_start << "\n";
+        stats_file << "loop_end: " << loop_end << "\n";
+    }
 
     SLAM.SaveKeyFrameTrajectoryTUM(output_folder + "keyframes_poses_" + output_name + "_tum.txt");
     SLAM.SaveKeyFrameTrajectoryJSON(output_folder + "keyframes_poses_" + output_name + ".json", filenames);

@@ -25,6 +25,20 @@ endif()
 
 
 
+# TensorRT (optional): YOLOv8-seg detector from .engine files (e.g. FP16 on Jetson).
+find_path(TENSORRT_INCLUDE_DIR NvInfer.h PATH_SUFFIXES aarch64-linux-gnu x86_64-linux-gnu)
+find_library(TENSORRT_NVINFER_LIB nvinfer)
+find_path(CUDA_RUNTIME_INCLUDE_DIR cuda_runtime_api.h PATHS /usr/local/cuda/include)
+find_library(CUDA_CUDART_LIB cudart PATHS /usr/local/cuda/lib64)
+if(TENSORRT_INCLUDE_DIR AND TENSORRT_NVINFER_LIB AND CUDA_RUNTIME_INCLUDE_DIR AND CUDA_CUDART_LIB)
+   message("TensorRT found: ${TENSORRT_NVINFER_LIB}. TRTDetector (.engine) enabled.")
+   add_definitions(-DUSE_TENSORRT)
+   set(TENSORRT_LIBS ${TENSORRT_NVINFER_LIB} ${CUDA_CUDART_LIB})
+   set(TENSORRT_INCLUDE_DIRS ${TENSORRT_INCLUDE_DIR} ${CUDA_RUNTIME_INCLUDE_DIR})
+else()
+   message(WARNING "TensorRT/CUDA runtime not found. TRTDetector (.engine) will not be available.")
+endif()
+
 find_package(Eigen3 3.1.0 REQUIRED)
 find_package(Pangolin REQUIRED)
 find_package(Protobuf REQUIRED)
@@ -42,6 +56,7 @@ ${PROJECT_SOURCE_DIR}/include
 ${EIGEN3_INCLUDE_DIR}
 ${Pangolin_INCLUDE_DIRS}
 ${PROTOBUF_INCLUDE_DIR}
+${TENSORRT_INCLUDE_DIRS}
 )
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
@@ -69,6 +84,7 @@ src/Viewer.cc
 src/Osmap.cpp
 src/osmap.pb.cc
 src/ImageDetections.cc
+src/TRTDetector.cc
 src/Ellipse.cc
 src/Ellipsoid.cc
 src/ObjectTrack.cc
@@ -96,6 +112,7 @@ ${PROTOBUF_LIBRARIES}
 nlohmann_json::nlohmann_json
 stdc++fs
 dlib::dlib
+${TENSORRT_LIBS}
 )
 
 
@@ -120,7 +137,9 @@ target_link_libraries(oa-slam_rgb-d-offline ${PROJECT_NAME})
 
 # --- ROS 2 Integration ---
 # Tìm các gói ROS 2 cần thiết
-find_package(rclcpp REQUIRED)
+# Optional: only built when ROS 2 is available.
+find_package(rclcpp QUIET)
+if(rclcpp_FOUND)
 find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
@@ -152,3 +171,4 @@ target_link_libraries(ros_oa_slam_rgbd
 # Fix lỗi C++ standard nếu cần (ROS 2 Humble cần C++17, Foxy cần C++14)
 # Nếu build bị lỗi standard, bỏ comment dòng dưới:
 # target_compile_features(ros_oa_slam_rgbd PUBLIC cxx_std_17)
+endif()

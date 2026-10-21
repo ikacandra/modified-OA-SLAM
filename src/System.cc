@@ -373,6 +373,12 @@ void System::Reset()
     mbReset = true;
 }
 
+void System::RequestViewerFinish()
+{
+    if (mpViewer)
+        mpViewer->RequestFinish();
+}
+
 void System::Shutdown()
 {
     mpLocalMapper->RequestFinish();
